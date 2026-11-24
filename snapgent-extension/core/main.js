@@ -976,6 +976,47 @@
   const isContextInvalidated = (m) =>
     /Extension context invalidated|Receiving end does not exist|message port closed/i.test(m || "");
 
+
+  let workspaceChoice = null;
+  let workspaceChoosing = false;
+  let workspaceChoiceLoad = null;
+  const workspaceKey = () => P.id + ":" + selectedTargetId + ":" + (P.conversationKey() || "");
+  const newWorkspaceSession = () => Array.from(crypto.getRandomValues(new Uint8Array(32)), x=>x.toString(16).padStart(2,"0")).join("");
+  const workspaceStorageKey = key => "zsWorkspace:" + key;
+  function saveWorkspaceChoice(choice) {
+    if (P.conversationKey() && choice.key === workspaceKey()) {
+      try { chrome.storage.local.set({[workspaceStorageKey(choice.key)]:{workspace:choice.workspace,session:choice.session}}); } catch {}
+    }
+  }
+  async function loadWorkspaceChoice() {
+    const key = workspaceKey();
+    if (workspaceChoice && workspaceChoice.key === key) return workspaceChoice;
+    // A blank chat receives its actual ID during its first submission.
+    if (workspaceChoice && workspaceChoice.key === P.id + ":" + selectedTargetId + ":" &&
+        P.conversationKey() && (A.starting || A.running || A.started)) {
+      workspaceChoice.key = key;
+      saveWorkspaceChoice(workspaceChoice);
+      return workspaceChoice;
+    }
+    if (workspaceChoiceLoad?.key === key) return workspaceChoiceLoad.task;
+    workspaceChoice = null;
+    if (!P.conversationKey()) return null;
+    const task = (async () => {
+      const saved = await new Promise(resolve => {
+        try { chrome.storage.local.get(workspaceStorageKey(key), r => resolve(r && r[workspaceStorageKey(key)])); }
+        catch { resolve(null); }
+      });
+      if (key !== workspaceKey()) return null;
+      if (workspaceChoice && workspaceChoice.key === key) return workspaceChoice;
+      if (saved && typeof saved.workspace === "string" && /^[0-9a-f]{64}$/.test(saved.session))
+        workspaceChoice = {key,server:selectedTargetId,workspace:saved.workspace,session:saved.session};
+      return workspaceChoice;
+    })();
+    workspaceChoiceLoad = {key,task};
+    try { return await task; }
+    finally { if (workspaceChoiceLoad?.task === task) workspaceChoiceLoad = null; }
+  }
+
   function bg(msg) {
     return new Promise((resolve) => {
       const fail = (m) => resolve({
@@ -1314,11 +1355,18 @@
     // it can only be right. (It still needs the game RUNNING; that's documented.)
     if ((bareName === "user_keyboard_input" || bareName === "user_mouse_input") && !args.datamodel_type)
       args.datamodel_type = "Client";
+    const boundWorkspace = isWorkspaceTarget() ? await loadWorkspaceChoice() : null;
+    if (isWorkspaceTarget() && A.bridge.workspaceBinding && !boundWorkspace) {
+      ui.banner("warn","Choose workspace","Use the Workspace button in the Snapgent bar, then continue this conversation.");
+      return "ERROR: No workspace selected. Ask the user to choose the workspace in the Snapgent bar before continuing.";
+    }
+    if (A.stop) return "ERROR: command not run - stopped.";
+    const workspaceFields = boundWorkspace ? {workspace:boundWorkspace.workspace,session:boundWorkspace.session} : {};
     const timeout = name === "execute_luau" ? 20000 : 120000;
     // Hard watchdog: even if the background worker never answers, the loop
     // gets a definitive result and continues.
     const hardCap = new Promise((res) =>
-      setTimeout(() => res({ ok: false, kind: "timeout", error: "no response from the extension worker" }), timeout + 30000));
+      setTimeout(() => res({ ok: false, kind: "timeout", error: "no response from the extension worker" }), timeout + (boundWorkspace ? 135000 : 30000)));
     // Stop watcher: a blocking tool (e.g. wait_job_finished) would otherwise keep
     // the loop awaiting the bridge for up to minutes, leaving the input locked and
     // the Stop button stuck. When the user halts (A.stop), abandon the wait within
@@ -1343,7 +1391,7 @@
       }).catch(() => {});
     }, 1000);
     bg({ type: "stream", frame: { phase: "tool_start", tool: name, id: callId, tok: A.genTok || 0 } }).catch(() => {});
-    let r = await Promise.race([bg({ type: "call_tool", name, arguments: args, timeout, server: selectedTargetId, turn: turnKeyForCache }), hardCap, stopWatch]);
+    let r = await Promise.race([bg({ type: "call_tool", name, arguments: args, timeout, server: selectedTargetId, turn: turnKeyForCache, ...workspaceFields }), hardCap, stopWatch]);
     clearInterval(loadingTick);
     clearInterval(stopTimer);
     bg({
@@ -1447,7 +1495,7 @@
       diag("bridge.disconnectedRetry", { name });
       await new Promise((res) => setTimeout(res, 1200));
       const retry = await Promise.race([
-        bg({ type: "call_tool", name, arguments: args, timeout, server: selectedTargetId, turn: turnKeyForCache }),
+        bg({ type: "call_tool", name, arguments: args, timeout, server: selectedTargetId, turn: turnKeyForCache, ...workspaceFields }),
         hardCap,
       ]);
       // The retry itself has to be judged by the same rule. A second attempt
@@ -2531,7 +2579,7 @@
   // ════════════════════════════════════════════════════════════════════════
   async function startSession() {
     await targetReady;
-    if (A.running || A.starting) return;
+    if (A.running || A.starting || workspaceChoosing) return;
     if (selectedTargetId === "none") {
       ui.toast("Select an MCP target first.");
       return;
@@ -2577,7 +2625,13 @@
           `Is the server online?`);
         return;
       }
-      if (isWorkspaceTarget()) {
+      if (isWorkspaceTarget() && A.bridge.workspaceBinding) {
+        const choice = await loadWorkspaceChoice();
+        if (!choice) { ui.banner("warn","Choose workspace","Select a local folder using Workspace, then Start."); return; }
+        const probe = await bg({type:"workspace_select",...choice});
+        if (!alive()) return;
+        if (!probe.ok) { ui.banner("warn","Workspace unavailable",probe.error || "Approve the selected workspace in the native bridge."); return; }
+      } else if (isWorkspaceTarget()) {
         const workspaceTool = activeTools().find((tool) => bareToolName(tool.name) === "list_dir");
         if (!workspaceTool) {
           ui.banner("warn", `${ui.getTargetName()} workspace required`,
@@ -2588,6 +2642,7 @@
           type: "call_tool",
           name: workspaceTool.name,
           arguments: { path: "." },
+          server: selectedTargetId,
           timeout: 5000,
         });
         if (!alive()) return;
@@ -3578,6 +3633,7 @@
             <button id="zs-target-btn" type="button" aria-haspopup="listbox" aria-label="Choose MCP target"><span id="zs-target-name"></span></button>
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
           </div>
+          <button id="zs-workspace" type="button" hidden title="Choose local workspace">Workspace</button>
           <button id="zs-switch" aria-label="Switch AI and options" title="Switch AI and options"><span id="zs-switch-name"></span><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button>
           <button id="zs-bar-hide" type="button" aria-label="Hide status card" title="Hide status card"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 15 12 9 18 15"/></svg></button>
         </div>
@@ -3593,6 +3649,7 @@
       stopBtn = root.querySelector("#zs-stop");
       targetSelect = root.querySelector("#zs-target");
       targetBtn = root.querySelector("#zs-target-btn");
+      root.querySelector("#zs-workspace").addEventListener("click", chooseWorkspace);
       targetMenuEl = root.querySelector("#zs-target-menu");
       switchBtn = root.querySelector("#zs-switch");
       hideBtn = root.querySelector("#zs-bar-hide");
@@ -3640,7 +3697,7 @@
         // Switching is always allowed (even while a session is running).
         // After the new target is persisted, reload the page so the whole
         // extension restarts cleanly against the newly selected MCP server.
-        if (A.running || A.starting || A.injecting || A.toolRunning || A.stopping) {
+        if (A.running || A.starting || A.injecting || A.toolRunning || A.stopping || workspaceChoosing) {
           setTarget(selectedTargetId);
           toast("Finish or stop this run before changing the target.");
           return;
@@ -3806,6 +3863,51 @@
     const targetNameHtml = () =>
       getTargetName().replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
 
+
+    async function chooseWorkspace() {
+      if (workspaceChoosing || A.running || A.starting || A.injecting || !isWorkspaceTarget()) return;
+      const server = selectedTargetId, key = workspaceKey();
+      workspaceChoosing = true;
+      let pop;
+      try {
+        const result = await bg({type:"workspace_list",server});
+        if (!result.ok || key !== workspaceKey()) { toast(result.error || "Update the native bridge to select workspaces."); return; }
+        pop = document.createElement("div");
+        pop.id = "zs-workspace-picker";
+        pop.innerHTML = '<section role="dialog" aria-modal="true" aria-label="Choose workspace"><h3>Choose workspace</h3><p>Recent local folders (may not be open)</p><select aria-label="Recent workspace"></select><label>Local folder path<input type="text" placeholder="Absolute directory path"></label><div><button type="button" data-cancel>Cancel</button><button type="button" data-confirm>Use workspace</button></div><p role="status"></p></section>';
+        const select = pop.querySelector("select"), input = pop.querySelector("input"), status = pop.querySelector('[role="status"]');
+        const empty = document.createElement("option"); empty.value = ""; empty.textContent = "Choose a folder or enter its path"; select.appendChild(empty);
+        for (const folder of result.workspaces || []) { const o = document.createElement("option"); o.value = folder; o.textContent = folder; select.appendChild(o); }
+        const current = await loadWorkspaceChoice();
+        if (current) input.value = current.workspace;
+        select.addEventListener("change",()=>{ if(select.value) input.value = select.value; });
+        document.documentElement.appendChild(pop);
+        input.focus();
+        const chosen = await new Promise(resolve => {
+          pop.querySelector("[data-cancel]").addEventListener("click",()=>resolve(null));
+          pop.querySelector("[data-confirm]").addEventListener("click",()=>{ if(input.value.trim()) resolve(input.value.trim()); });
+          pop.addEventListener("keydown", e=>{ if(e.key==="Escape") resolve(null); e.stopPropagation(); });
+        });
+        if (!chosen || key !== workspaceKey() || A.running || A.starting || A.injecting) return;
+        if (current && current.workspace === chosen) { toast("Workspace already selected."); return; }
+        status.textContent = "Approve this workspace in the native Snapgent app.";
+        pop.querySelectorAll("button, input, select").forEach(e=>e.disabled=true);
+        const next = {key,server,workspace:chosen,session:newWorkspaceSession()};
+        const bind = await bg({type:"workspace_select",...next});
+        if (!bind.ok || key !== workspaceKey() || A.running || A.starting || A.injecting) {
+          if (bind.ok) bg({type:"workspace_release",server,session:next.session});
+          toast(bind.error || "Workspace selection cancelled."); return;
+        }
+        if (workspaceChoice) bg({type:"workspace_release",server:workspaceChoice.server,session:workspaceChoice.session});
+        next.workspace = bind.text || chosen;
+        workspaceChoice = next;
+        saveWorkspaceChoice(next);
+        workspaceReady = true;
+        workspaceProbeAt = 0;
+        toast("Workspace selected.");
+      } finally { if(pop) pop.remove(); workspaceChoosing = false; renderBar(); }
+    }
+
     function setTarget(id = selectedTargetId) {
       if (!targetSelect) return;
       const options = [
@@ -3829,7 +3931,15 @@
         targetSelect.dataset.optionsKey = optionsKey;
       }
       targetSelect.value = id;
-      targetSelect.disabled = !!(A.running || A.starting || A.injecting || A.toolRunning || A.stopping);
+      targetSelect.disabled = !!(A.running || A.starting || A.injecting || A.toolRunning || A.stopping || workspaceChoosing);
+      const workspaceBtn = root.querySelector("#zs-workspace");
+      if (workspaceBtn) {
+        workspaceBtn.hidden = !isWorkspaceTarget(id) || !A.bridge.workspaceBinding;
+        workspaceBtn.disabled = targetSelect.disabled;
+        const choice = workspaceChoice && workspaceChoice.key === workspaceKey() ? workspaceChoice : null;
+        workspaceBtn.textContent = choice ? choice.workspace.split(/[\\/]/).filter(Boolean).pop() || "Workspace" : "Workspace";
+        workspaceBtn.title = choice ? choice.workspace : "Choose local workspace";
+      }
       const nameEl = root && root.querySelector("#zs-target-name");
       if (nameEl) nameEl.textContent = (options.find((option) => option.id === id) || { name: id }).name;
       if (targetMenuEl && !targetMenuEl.hidden) renderTargetMenu();
@@ -4198,6 +4308,7 @@
     //  • existing chat    → "No agent in this chat" (informs only, no action)
     function renderBar() {
       if (!bar) return;
+      if (isWorkspaceTarget() && A.bridge.workspaceBinding) workspaceReady = !!(workspaceChoice && workspaceChoice.key === workspaceKey());
       setTarget(selectedTargetId);
       // indicator = an optional leading spinner; msg = the wrappable text.
       let toneClass = "standby", indicator = "", msg = "", label = "", kind = "", disabled = false, warn = false;
@@ -4227,6 +4338,9 @@
         if (!A.bridge.connected) {
           toneClass = "warn"; warn = true;
           msg = `<b>Active</b> · run start.bat`;
+        } else if (isWorkspaceTarget() && A.bridge.workspaceBinding && (!workspaceChoice || workspaceChoice.key !== workspaceKey())) {
+          toneClass = "warn"; warn = true;
+          msg = `<b>Active</b> · choose workspace`;
         } else if (!bridgeOk) {
           toneClass = "warn"; warn = true;
           msg = `<b>Active</b> · ${targetNameHtml()} offline`;
@@ -4308,7 +4422,7 @@
               : isWorkspaceTarget() && (bridgeOk || vscodeWorkspaceMissing)
                 ? workspaceProbePending
                   ? `Checking <b>${targetNameHtml()} workspace</b>…`
-                  : `Open a <b>folder in ${targetNameHtml()}</b>`
+                  : A.bridge.workspaceBinding ? `Choose a <b>workspace</b>` : `Open a <b>folder in ${targetNameHtml()}</b>`
                 : `<b>${targetNameHtml()} unavailable</b>`;
             label = `▶︎ Start`; kind = "start"; disabled = true;
           } else if (bridgeOk && (!isWorkspaceTarget() || workspaceReady)) {
@@ -4451,13 +4565,10 @@
               workspaceProbeFails += 1;
               return;
             }
-            return bg({
-              type: "call_tool",
-              name: workspaceTool.name,
-              arguments: { path: "." },
-              server: selectedTargetId,
-              timeout: 5000,
-            }).then((result) => {
+            const probe = s.workspaceBinding ? loadWorkspaceChoice().then(choice => ({ok:!!choice})) : bg({
+              type: "call_tool", name:workspaceTool.name, arguments:{path:"."}, server:selectedTargetId, timeout:5000
+            });
+            return probe.then((result) => {
               workspaceReady = !!(result && result.ok);
               workspaceProbeFails = workspaceReady ? 0 : workspaceProbeFails + 1;
             });
@@ -5468,7 +5579,7 @@
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg && msg.type === "zs-status") {
-      ui.setStatus({ connected: msg.connected, mcpAlive: msg.mcpAlive, studio: msg.studio, studioApp: msg.studioApp, studioProc: msg.studioProc, tools: msg.tools, servers: msg.servers });
+      ui.setStatus(msg);
     }
     if (msg && msg.type === "zs-resume") {
       // Manual "resume the pending command" - from the popup's Resume button.
@@ -5624,6 +5735,9 @@
     }
     if (A.starting || A.injecting || A.running) return;
     const path = P.conversationKey();
+    if (isWorkspaceTarget() && A.bridge.workspaceBinding && workspaceChoice && workspaceChoice.key !== workspaceKey()) {
+      loadWorkspaceChoice().then(()=>ui.setStarted(A.started));
+    }
     const markerInDom = domHasZsSignal();
     if (markerInDom) rememberSession(path);
     let has;
@@ -5744,7 +5858,7 @@
   // User-send interception: the provider wires the site's composer events to
   // these callbacks.
   P.installSendHooks({
-    isBlocked: () => A.injecting || A.running || A.starting,
+    isBlocked: () => A.injecting || A.running || A.starting || workspaceChoosing,
     isStarted: () => A.started,
     onBlockedAttempt: () => ui.nudgeStart(),
     onUserMessage: (base) => {

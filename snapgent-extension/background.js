@@ -95,6 +95,9 @@ let toolsCache = [];
 let mcpAlive = false;
 let serversCache = [];
 let bridgeVersion = null;
+let workspaceBinding = null;
+const boundSessions = new Map();
+const bindingRequests = new Map();
 // true/false = a PLACE is loaded and usable in Roblox Studio; null = unknown.
 // The MCP process stays alive when Studio is closed or its MCP option is off,
 // so this is probed separately (bridge "studio_status").
@@ -186,6 +189,9 @@ function connect() {
   }
   ws = socket;
   connected = false;
+  workspaceBinding = null;
+  boundSessions.clear();
+  bindingRequests.clear();
   connectionState = "connecting";
   const revision = credentialRevision;
   let stage = "opening", key, clientNonce, serverNonce;
@@ -271,6 +277,9 @@ function connect() {
     serversCache = [];
     toolsCache = [];
     bridgeVersion = null;
+    workspaceBinding = null;
+    boundSessions.clear();
+    bindingRequests.clear();
     stopHeartbeat();
     failAllPending("bridge connection closed");
     broadcastStatus();
@@ -451,6 +460,7 @@ function handleBridgeMessage(msg) {
   }
   if (msg.type === "connected") {
     bridgeVersion = typeof msg.bridge_version === "string" ? msg.bridge_version : null;
+    workspaceBinding = msg.workspace_binding === true;
     mcpAlive = !!msg.mcp_alive;
     if (Array.isArray(msg.tools)) toolsCache = msg.tools;
     if (Array.isArray(msg.servers)) serversCache = msg.servers;
@@ -462,6 +472,7 @@ function handleBridgeMessage(msg) {
     return;
   }
   if (msg.type === "tools") {
+    if (typeof msg.workspace_binding === "boolean") workspaceBinding = msg.workspace_binding;
     if (Array.isArray(msg.tools)) toolsCache = msg.tools;
     if (Array.isArray(msg.servers)) serversCache = msg.servers;
     mcpAlive = !!msg.mcp_alive;
@@ -471,7 +482,7 @@ function handleBridgeMessage(msg) {
   }
   if (msg.type === "tool_result") {
     resolvePending(msg.id, msg.ok
-      ? { ok: true, text: msg.text, images: msg.images || [] }
+      ? { ok: true, text: msg.text, images: msg.images || [], workspaces: msg.workspaces }
       : { ok: false, kind: msg.kind, error: msg.error });
     return;
   }
@@ -517,7 +528,7 @@ function failAllPending(reason) {
 
 // ── status push to any open DeepSeek tab + popup ─────────────────────────
 function statusObj() {
-  return { type: "zs-status", connected, connectionState, connectionError, mcpAlive, bridgeVersion, studio: studioConnected, studioApp, studioProc, tools: toolsCache.length, servers: serversCache };
+  return { type: "zs-status", connected, connectionState, connectionError, workspaceBinding, mcpAlive, bridgeVersion, studio: studioConnected, studioApp, studioProc, tools: toolsCache.length, servers: serversCache };
 }
 
 function broadcastStatus() {
@@ -536,6 +547,33 @@ function broadcastStatus() {
       });
     }
   } catch {}
+}
+
+
+async function ensureWorkspaceBound(msg, force = false) {
+  const { server, session, workspace } = msg;
+  if (!["zed","vscode"].includes(server) || !validCredential(session) || typeof workspace !== "string" || !workspace.trim())
+    return { ok:false, kind:"workspace_required", error:"Choose a workspace in the Snapgent bar.", sent:false };
+  const key = server + ":" + session;
+  if (!force && boundSessions.get(key) === workspace) return { ok:true, text:workspace };
+  const existing = bindingRequests.get(key);
+  if (existing) return existing.workspace === workspace ? existing.task : {ok:false,kind:"permission_denied",error:"Conflicting workspace selection."};
+  const socket = ws;
+  const task = (async () => {
+    const reply = await send({type:"workspace_bind",server,session,workspace}, 100000);
+    if (reply.ok && socket === ws && connected) boundSessions.set(key,workspace);
+    return reply;
+  })();
+  bindingRequests.set(key, {workspace,task});
+  try { return await task; }
+  finally { if (bindingRequests.get(key)?.task === task) bindingRequests.delete(key); }
+}
+async function waitWorkspaceCapability() {
+  if (!connected) await waitForConnection(8000);
+  const start = Date.now();
+  while (connected && workspaceBinding === null && Date.now() - start < 4000)
+    await new Promise(resolve => setTimeout(resolve, 100));
+  return connected ? workspaceBinding : null;
 }
 
 // ── messages from content.js / popup.js ─────────────────────────────────
@@ -589,14 +627,39 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         else sendResponse({ ok: toolsCache.length > 0, tools: toolsCache, error: r.error });
         break;
       }
+      case "workspace_list":
+        sendResponse(await send({type:"workspace_list",server:msg.server},10000)); break;
+      case "workspace_select":
+        sendResponse(await ensureWorkspaceBound(msg)); break;
+      case "workspace_release": {
+        if (validCredential(msg.session)) {
+          boundSessions.delete(msg.server + ":" + msg.session);
+          await send({type:"workspace_release",session:msg.session},5000);
+        }
+        sendResponse({ok:true}); break;
+      }
       case "call_tool": {
         const timeout = (msg.timeout || 120000) + 10000;
-        const r = await send(
-          { type: "call_tool", name: msg.name, arguments: msg.arguments, timeout: msg.timeout, server: msg.server, turn: msg.turn },
-          timeout
-        );
-        sendResponse(r);
-        break;
+        const editor = ["zed","vscode"].includes(msg.server);
+        const payload = {type:"call_tool", name:msg.name, arguments:msg.arguments, timeout:msg.timeout, server:msg.server, turn:msg.turn};
+        if (editor) {
+          const capability = await waitWorkspaceCapability();
+          if (capability === null) { sendResponse({ok:false,kind:"disconnected",sent:false,error:"Waiting for the authenticated workspace catalogue."}); break; }
+          if (capability || msg.workspace) {
+            if (!capability) { sendResponse({ok:false,kind:"workspace_required",sent:false,error:"Rebuild and restart the native bridge before using a saved workspace."}); break; }
+            const bound = await ensureWorkspaceBound(msg);
+            if (!bound.ok) { sendResponse({...bound,sent:false}); break; }
+            payload.session = msg.session;
+          }
+        }
+        let result = await send(payload,timeout);
+        // An explicit unbound error is emitted before execution, so recovery may retry safely.
+        if (payload.session && result.kind === "workspace_unbound") {
+          const bound = await ensureWorkspaceBound(msg,true);
+          if (bound.ok) result = await send(payload,timeout);
+          else result = {...bound,sent:false};
+        }
+        sendResponse(result); break;
       }
       case "stream":
         // Loading/progress frame from the page. Answer immediately with whether it
@@ -629,7 +692,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       default:
         sendResponse({ ok: false, error: "unknown message" });
     }
-  })();
+  })().catch(() => sendResponse({ok:false,kind:"error",error:"Extension request failed."}));
   return true; // async sendResponse
 });
 
