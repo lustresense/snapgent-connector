@@ -10,16 +10,25 @@ pub struct Settings {
 impl Settings {
     pub fn load() -> Result<Self> {
         let exe = env::current_exe()?;
+        // A fresh clone has no config.json (it is intentionally gitignored).
+        // Locate the native project using its tracked extension manifest.
+        let cwd = env::current_dir().ok();
+        let is_project = |p: &std::path::Path| {
+            p.join("snapgent-extension/manifest.json").is_file()
+        };
         let root = exe
             .ancestors()
             .skip(1)
-            .find(|p| p.join("config.json").is_file())
+            .find(|p| is_project(p))
             .map(|p| p.to_path_buf())
+            .or_else(|| cwd.clone().filter(|p| is_project(p)))
             .or_else(|| {
-                env::current_dir()
-                    .ok()
-                    .filter(|p| p.join("config.json").is_file())
+                exe.ancestors()
+                    .skip(1)
+                    .find(|p| p.join("config.json").is_file())
+                    .map(|p| p.to_path_buf())
             })
+            .or_else(|| cwd.filter(|p| p.join("config.json").is_file()))
             .context("Place Snapgent.exe in the Snapgent project directory")?;
         let directory = env::var_os("LOCALAPPDATA")
             .or_else(|| env::var_os("XDG_STATE_HOME"))

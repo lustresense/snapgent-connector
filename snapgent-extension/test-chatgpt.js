@@ -147,6 +147,7 @@ global.document = {
   querySelector: (selector) => selector.includes("Send message") ? submitControl : null,
   querySelectorAll: (selector) => {
     if (selector.includes("data-message-author-role") || selector.includes("DilResponseRoot")) return messageNodes;
+    if (selector.includes("composer-submit-button")) return submitControl ? [submitControl] : [];
     return selector.includes("mobile-composer-prompt") || selector.includes('role="textbox"') ? composerNodes : [];
   },
   addEventListener: () => {},
@@ -253,7 +254,7 @@ ok("command in DilResponseRoot reply is parsed", dilReplyCalls.length === 1 && d
 
 // ChatGPT's newer compact composer is a controlled textarea instead of the
 // ProseMirror #prompt-textarea. It still needs the bar anchor and send path.
-const composerForm = { closest: () => null };
+const composerForm = { closest: () => null, contains: (node) => node === submitControl };
 const mobileComposer = Object.assign(new StubTextArea(), {
   tagName: "TEXTAREA",
   id: "mobile-composer-prompt",
@@ -268,6 +269,8 @@ const mobileComposer = Object.assign(new StubTextArea(), {
   dispatchEvent() {},
 });
 submitControl = {
+  isConnected: true,
+  getBoundingClientRect: () => ({width: 32, height: 32}),
   offsetParent: {},
   disabled: false,
   getAttribute: () => null,
@@ -626,7 +629,14 @@ ok("mobile textarea text can be read", P.editorText() === "");
   ok("successful send paths report true",
     /(?:btn\.click\(\);[\s\S]{0,60}return true|if \(btn\) \{ btn\.click\(\); return true; \})/.test(prov));
   ok("core retries the send when the provider could not type",
-    /(?:const|let)?\s*typed = await P\.typeAndSend\(text, images\);[\s\S]{0,900}if \(typed === false\) \{[\s\S]{0,400}continue;/.test(core));
+    core.includes("typed = await P.typeAndSend(text, images);") &&
+    core.includes("if (typed === false && !possibleSubmission)") &&
+    core.includes("possibleSubmission = possibleSubmission || typed !== false;"));
+  ok("ambiguous delayed acceptance is guarded before another send",
+    core.includes("if (possibleSubmission && !P.editorText().trim())") &&
+    core.includes("Submission status uncertain; stopped to prevent duplicate messages."));
+  ok("ChatGPT stages an image set at most once per feedback",
+    prov.includes("!stagedSendImages.has(images)") && prov.includes("stagedSendImages.add(images)"));
 }
 
 // ── ChatGPT DISABLES the composer: contenteditable flips to "false" while a

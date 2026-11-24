@@ -20,7 +20,7 @@ No running code editor is required. Choose an absolute local folder before start
 
 1. Build the native executable using `powershell -File development/build-native.ps1`.
 2. Load `snapgent-extension` as an unpacked extension in your Chromium browser.
-3. Run `start.bat` and configure the trusted extension ID in the native application.
+3. Run `start.bat` and configure the trusted extension ID in the native application. A fresh clone needs no `config.json`; optional MCP integrations create it when configured.
 4. Pair the extension with the bridge locally.
 5. Open a supported AI chat, select Local Workspace, choose your absolute folder path and press Start.
 

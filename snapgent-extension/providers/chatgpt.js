@@ -983,8 +983,8 @@ const ZSProvider = (() => {
     let got = "";
     try {
       const d = ed && ed.pmViewDesc;
-      got = d && d.node
-        ? d.node.textBetween(0, d.node.content.size, "\n")
+      got = ed && ed.tagName === "TEXTAREA" ? ed.value
+        : d && d.node ? d.node.textBetween(0, d.node.content.size, "\n")
         : (ed.textContent || ed.innerText || "");
     } catch { got = ""; }
     const have = normalize(got);
@@ -1190,6 +1190,7 @@ const ZSProvider = (() => {
     return await typeEditorText(ed, text);
   }
 
+  const stagedSendImages = new WeakSet();
   async function typeAndSend(text, images) {
     let ed = getEditor();
     if (!ed) throw new Error("ChatGPT input box not found");
@@ -1268,6 +1269,8 @@ const ZSProvider = (() => {
           continue;
         }
         ed = ready;
+        // Keep the exact staged draft on retry rather than remounting the editor.
+        if (composerHolds(ed, text)) { got = editorText().length; break; }
         const accepted = await setEditorText(ed, text);
         if (!accepted) diag("send.refused", { attempt });
         got = editorText().length;
@@ -1284,40 +1287,33 @@ const ZSProvider = (() => {
         diag("send.typedPartial", { len: got, want: text.length });
         return false;
       }
-      // Attach images LAST, right before the send click - see gemini.js/deepseek.js
-      // typeAndSend for why (attaching first and then retyping the text can sever
-      // the site's binding between the pending upload and the message sent).
-      if (images && images.length) {
-        try { await attachImages(images); } catch {}
-        // ChatGPT disables the send button while an upload is still in flight, so
-        // poll the click instead of gating on a specific "upload done" node.
-        const t0 = Date.now();
-        while (Date.now() - t0 < 25000) {
-          const b = sendButton();
-          if (b && !b.disabled) { try { b.click(); } catch {} }
-          if (await waitFor(() => editorText().trim() === "" || !!stopButton(), 1200)) return true;
-        }
+      // Attach once per logical feedback. A retry must not duplicate uploads.
+      if (images && images.length && !stagedSendImages.has(images)) {
+        stagedSendImages.add(images);
+        await attachImages(images);
+      }
+      const beforeUsers = userCount();
+      const accepted = () => userCount() > beforeUsers || !editorText().trim() || !!stopButton();
+      const ready = () => {
+        const b = sendButton();
+        return !!b && !b.disabled && b.getAttribute("aria-disabled") !== "true";
+      };
+      await waitFor(ready, images && images.length ? 25000 : 8000);
+      if (!sendButton() && !genActive()) await unwedgeStopPersistently();
+      if (userCount() > beforeUsers || !editorText().trim()) return true;
+      if (stopButton()) return false;
+      ed = getEditor();
+      if (!ed || !composerHolds(ed, text)) return false;
+      if (ready()) {
+        const btn = sendButton();
+        btn.click();
+        if (await waitFor(accepted, 6000)) return true;
+        // Report an attempted submission even if the site has not acknowledged
+        // the click; core checks the transcript and guards duplicate retries.
         return true;
       }
-      // Wait for the control to be in its SEND role (proof ProseMirror registered
-      // the text, and that no generation is in flight).
-      const beforeUsers = userCount();
-      const accepted = () => userCount() > beforeUsers || !editorText().trim() || genActive();
-      await waitFor(() => { const b = sendButton(); return !!b && !b.disabled; }, 8000);
-      if (!sendButton() && !genActive()) await unwedgeStopPersistently();
-      if (accepted()) return true;
-      ed = getEditor();
-      if (!ed || !composerHolds(ed, text)) return false;
-      const btn = sendButton();
-      if (btn && !btn.disabled && btn.getAttribute("aria-disabled") !== "true") {
-        btn.click();
-        if (await waitFor(accepted, 4000)) return true;
-      }
-      if (accepted()) return true;
-      if (genActive() || (sendButton() && sendButton().disabled)) return false;
-      ed = getEditor();
-      if (!ed || !composerHolds(ed, text)) return false;
-      // Allow only these exact internal keyboard events through our input lock.
+      // Never bypass a disabled send control (quota/upload/generation).
+      if (sendButton() || stopButton()) return false;
       ed.focus({ preventScroll: true });
       const o = { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true, composed: true };
       for (const kind of ["keydown", "keyup"]) {
@@ -1327,9 +1323,9 @@ const ZSProvider = (() => {
       }
       const sent = await waitFor(accepted, 5000);
       diag("send.fallbackVerified", { sent: !!sent });
-      return !!sent;
+      return true;
     } finally {
-      if (relock) setEditable(false);
+      if (relock) { ed = getEditor() || ed; setEditable(false); }
     }
   }
 

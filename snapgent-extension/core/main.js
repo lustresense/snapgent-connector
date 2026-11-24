@@ -423,14 +423,20 @@
       // nudge catches it). See preHideWholeItems.
       A.injectPreUser = preUser;
       A.injectHideUntil = Date.now() + 2500;
-      // "Landed" = a new turn appeared in the DOM. In long chats, list
-      // virtualisation can keep counts flat even when our message landed - the
-      // textarea-cleared signal below is the primary fast gate.
-      const previousAssistantId = P.lastAssistantId ? P.lastAssistantId() : null;
+      // A cleared composer alone is ambiguous. In virtualized chats, identify
+      // a newly rendered user turn by its stable key and matching message text.
+      const previousUsers = P.allItems().filter(P.isUserItem);
+      const previousKeys = new Set(previousUsers.map(it => P.itemKey ? P.itemKey(it) : it).filter(k => k != null));
+      const signature = String(text).replace(/\s+/g, "").slice(0, 160);
       const landed = () => {
         if (P.userCount() > preUser || P.assistantCount() > base) return true;
-        const current = P.lastAssistantId ? P.lastAssistantId() : null;
-        return current != null && previousAssistantId != null && current !== previousAssistantId;
+        if (!signature) return false;
+        return P.allItems().filter(P.isUserItem).slice(-3).some(it => {
+          const key = P.itemKey ? P.itemKey(it) : it;
+          if (key == null || previousKeys.has(key)) return false;
+          const value = P.itemText ? P.itemText(it) : it.textContent;
+          return String(value || "").replace(/\s+/g, "").includes(signature);
+        });
       };
       // CRITICAL: never type/send while the tab is HIDDEN. Background tabs throttle
       // rendering, which made the landed-check unreliable and caused the SAME
@@ -438,14 +444,21 @@
       let tries = 0;
       let messageSent = false;
       const maxTries = 8;
+      let possibleSubmission = false;
       while (!messageSent && !landed() && tries < maxTries && !A.stop) {
         if (document.hidden) {
           diag("send.waitVisible", { tries });
           if (!(await waitVisible()) || A.stop) break; // park (no cap) until foreground; break only on user stop
         }
         await jitterBeforeSend();
+        // A delayed acceptance can clear the draft during backoff. Never
+        // reconstruct that message until its fate is known.
+        if (possibleSubmission && !P.editorText().trim()) {
+          if (await waitFor(landed, 20000)) { messageSent = true; break; }
+          if (!P.editorText().trim()) throw new Error("Submission status uncertain; stopped to prevent duplicate messages.");
+        }
         diag("submit.typeAndSend", { hasImages: !!(images && images.length) });
-        let typed = false;
+        let typed;
         try {
           if (landed() || A.stop) break;
           typed = await P.typeAndSend(text, images);
@@ -460,7 +473,10 @@
         // the false positive that stranded Start on "Starting…" for minutes
         // with zero turns. Retry the send instead of believing it went out.
         if (landed()) { messageSent = true; break; }
-        if (typed === false) {
+        // false is reserved for a provider that did not attempt submission.
+        // Undefined (legacy adapters) or exceptions may occur after a click.
+        possibleSubmission = possibleSubmission || typed !== false;
+        if (typed === false && !possibleSubmission) {
           if (await waitFor(landed, 2000)) { messageSent = true; break; }
           diag("send.retry", { tries });
           tries++;
@@ -477,8 +493,7 @@
         // input is covered and the loop owns this send, so no user turn can slip
         // into the window, and the pre-hide is one-shot (consumes the first turn).
         A.injectHideUntil = Date.now() + 2500;
-        // The site clears the textarea as soon as the send is accepted - faster
-        // and more reliable than waiting for a DOM turn count change.
+        // Wait for a transcript turn; a cleared draft is not confirmation.
         await waitFor(() => {
           if (landed()) messageSent = true;
           return messageSent;
@@ -5247,7 +5262,8 @@
         root.appendChild(stack);
         const place = () => {
           if (!stack.isConnected) return;
-          const anchor = bar && bar.getClientRects().length ? bar : dotBtn;
+          const anchor = cover && cover.dataset.on === "1" && cover.getClientRects().length
+            ? cover : (bar && bar.getClientRects().length ? bar : dotBtn);
           const rect = anchor && anchor.getClientRects().length ? anchor.getBoundingClientRect() : null;
           const width = stack.offsetWidth;
           const center = rect ? rect.left + rect.width / 2 : innerWidth / 2;
