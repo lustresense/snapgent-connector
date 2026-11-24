@@ -171,16 +171,16 @@ const ZS = (() => {
       siteName = "this AI site",
       customPrompt = "",
       providerNotes = "",
-      targetServer = "vscode",
-      targetName = "VS Code",
+      targetServer = "local",
+      targetName = "Local Workspace",
       skills = [],
       antislopRules = "",
     } = opts;
 
     if (targetServer !== "roblox") {
-      const prompt = `CONTEXT: snapgentV3 is a browser extension that sends your plain-text JSON commands to the user's selected MCP server through their local bridge. The selected target is ${targetName} (server id: ${targetServer}).
+      const prompt = `CONTEXT: Snapgent is a local agent harness that executes your plain-text JSON commands through a native bridge. The selected target is ${targetName} (server id: ${targetServer}). ${targetServer === "local" ? "You have native filesystem, terminal and Git tools scoped to the user's explicitly approved workspace. No code editor is required. Terminal commands run with the user's OS permissions and require local approval." : "This target is an optional external MCP integration."}
 
-The extension reads commands from your normal reply text and runs them on that MCP server. Your own built-in tools, connectors, or code execution do not access the user's machine. For work on the selected target, write exactly one command per reply as a fenced JSON block:
+The extension reads commands from your normal reply text and dispatches them to the selected backend. Your own built-in tools, connectors, or code execution do not access the user's machine. For work on the selected target, write exactly one command per reply as a fenced JSON block:
 \`\`\`json
 {"command":"exact_tool_name","params":{"key":"value"}}
 \`\`\`
@@ -360,7 +360,7 @@ IMPORTANT: Your very first action is to write \`list_commands\` with no params (
   // a tool result every so often so the model does not drift from the exact
   // command names over a long session. It is explicitly framed as an automatic
   // snapgentV3 reminder (NOT a user message and NOT a new command to run).
-  function toolsReminder(tools, targetName = "VS Code", serverId = "vscode") {
+  function toolsReminder(tools, targetName = "Local Workspace", serverId = "local") {
     const toolsString =
       `  list_commands(server: "${serverId}") - list available ${targetName} commands with full parameter details\n` +
       compactTools(tools);

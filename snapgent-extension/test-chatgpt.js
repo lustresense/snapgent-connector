@@ -624,9 +624,9 @@ ok("mobile textarea text can be read", P.editorText() === "");
   ok("typeAndSend returns false instead of clicking an empty composer",
     /if \(!got\) \{\s*\n\s*diag\("send\.typedFailed"[\s\S]{0,140}return false;/.test(prov));
   ok("successful send paths report true",
-    /if \(btn\) \{ btn\.click\(\); return true; \}/.test(prov));
+    /(?:btn\.click\(\);[\s\S]{0,60}return true|if \(btn\) \{ btn\.click\(\); return true; \})/.test(prov));
   ok("core retries the send when the provider could not type",
-    /const typed = await P\.typeAndSend\(text, images\);[\s\S]{0,900}if \(typed === false\) \{[\s\S]{0,400}continue;/.test(core));
+    /(?:const|let)?\s*typed = await P\.typeAndSend\(text, images\);[\s\S]{0,900}if \(typed === false\) \{[\s\S]{0,400}continue;/.test(core));
 }
 
 // ── ChatGPT DISABLES the composer: contenteditable flips to "false" while a
@@ -812,6 +812,8 @@ ok("mobile textarea text can be read", P.editorText() === "");
   const pickSrc = (prov.match(/function pickSubmit\(list, ed\) \{[\s\S]*?\n  \}/) || [""])[0];
   const btn = (aria, visible) => ({
     aria,
+    isConnected: true,
+    getBoundingClientRect: () => ({width: visible ? 32 : 0, height: visible ? 32 : 0}),
     getClientRects: () => (visible ? [{}] : []),
     getAttribute: (n) => (n === "aria-label" ? aria : null),
   });
@@ -822,7 +824,7 @@ ok("mobile textarea text can be read", P.editorText() === "");
   const liveForm = formOf([liveSend, liveStop]);
   const ed = { closest: (s) => (s === "form" ? liveForm : null) };
   const pickWith = (list) => {
-    try { return new Function("return (" + pickSrc + ");")(); }
+    try { return new Function("getComputedStyle", "return (" + pickSrc + ");")(() => ({visibility: "visible", display: "block"})); }
     catch { return null; }
   };
   const pick = pickWith();

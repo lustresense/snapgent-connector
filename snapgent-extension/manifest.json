@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "snapgentV3",
   "version": "3.9.14",
-  "description": "Turn ChatGPT, Claude, DeepSeek, Gemini, Grok, Kimi, GLM, Qwen, Qwen Coder, Arena, Meta AI, Ptero or Mistral into a VS Code agent through a local bridge.",
+  "description": "Turn ChatGPT, Claude, DeepSeek, Gemini, Grok, Kimi, GLM, Qwen, Qwen Coder, Arena, Meta AI, Ptero or Mistral into a local workspace agent without requiring an editor.",
   "browser_specific_settings": {
     "gecko": {
       "id": "snapgent@connector.local",

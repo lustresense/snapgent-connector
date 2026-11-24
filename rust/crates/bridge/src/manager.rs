@@ -24,7 +24,6 @@ struct Server {
 pub struct Manager {
     root: PathBuf,
     servers: RwLock<BTreeMap<String, Server>>,
-    pins: Mutex<HashMap<String, Arc<Workspace>>>,
     session_pins: Mutex<HashMap<(String, String), Arc<Workspace>>>,
     bound_roots: Mutex<HashMap<PathBuf, std::sync::Weak<Workspace>>>,
     admin: Mutex<()>,
@@ -35,7 +34,6 @@ impl Manager {
         Self {
             root,
             servers: RwLock::new(BTreeMap::new()),
-            pins: Mutex::new(HashMap::new()),
             session_pins: Mutex::new(HashMap::new()),
             bound_roots: Mutex::new(HashMap::new()),
             admin: Mutex::new(()),
@@ -50,7 +48,7 @@ impl Manager {
     fn config(&self) -> Result<Value> {
         let path = self.config_path();
         if !path.exists() {
-            return Ok(json!({"mcpServers":{"vscode":{},"zed":{}}}));
+            return Ok(json!({"mcpServers":{}}));
         }
         let config: Value = serde_json::from_slice(&std::fs::read(path)?)?;
         if !config["mcpServers"].is_object() {
@@ -66,9 +64,16 @@ impl Manager {
         let config = self.config()?;
         self.stop_inner().await;
         if release_pins {
-            self.pins.lock().await.clear();
             self.session_pins.lock().await.clear();
         }
+        let workspace = Arc::new(Workspace::new(Editor::Local));
+        self.servers.write().await.insert(
+            "local".into(),
+            Server {
+                tools: workspace.tools(),
+                backend: Backend::Builtin(workspace),
+            },
+        );
         let mut tasks = tokio::task::JoinSet::new();
         for (id, entry) in config["mcpServers"]
             .as_object()
@@ -77,25 +82,9 @@ impl Manager {
             if !valid_id(id) || !entry.is_object() {
                 continue;
             }
-            if let Some(editor) = match id.as_str() {
-                "zed" => Some(Editor::Zed),
-                "vscode" => Some(Editor::VsCode),
-                _ => None,
-            } {
-                let mut pins = self.pins.lock().await;
-                let workspace = pins
-                    .entry(id.clone())
-                    .or_insert_with(|| Arc::new(Workspace::new(editor)))
-                    .clone();
-                let tools = workspace.tools();
-                self.servers.write().await.insert(
-                    id.clone(),
-                    Server {
-                        backend: Backend::Builtin(workspace),
-                        tools,
-                    },
-                );
-            } else {
+            if matches!(id.as_str(), "local" | "zed" | "vscode") {
+                continue;
+            } else if entry["enabled"].as_bool() == Some(true) {
                 self.servers.write().await.insert(
                     id.clone(),
                     Server {
@@ -150,7 +139,7 @@ impl Manager {
             .as_str()
             .filter(|s| valid_id(s))
             .context("Invalid MCP server id")?;
-        if id == "roblox" || id == "vscode" || (id == "zed" && !remove) {
+        if id == "local" || id == "roblox" || (matches!(id, "zed" | "vscode") && !remove) {
             bail!("Protected built-in MCP server id");
         }
         let mut config = self.config()?;
@@ -173,7 +162,10 @@ impl Manager {
             {
                 bail!("Invalid MCP args or env");
             }
-            servers.insert(id.into(), json!({"command":command,"args":args,"env":env}));
+            servers.insert(
+                id.into(),
+                json!({"command":command,"args":args,"env":env,"enabled":true}),
+            );
         }
         let path = self.config_path();
         let tmp = path.with_extension("json.tmp");
@@ -233,7 +225,7 @@ impl Manager {
         server: &str,
         workspace: Workspace,
     ) -> Result<()> {
-        if !snapgent_security::valid_nonce(session) || !matches!(server, "zed" | "vscode") {
+        if !snapgent_security::valid_nonce(session) || server != "local" {
             bail!("Invalid workspace session");
         }
         let mut pins = self.session_pins.lock().await;

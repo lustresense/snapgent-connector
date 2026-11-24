@@ -344,14 +344,13 @@ impl Desktop {
                     ui.vertical(|ui| {
                         ui.label(
                             RichText::new(match id {
-                                "zed" => "Zed",
-                                "vscode" => "VS Code",
+                                "local" => "Local Workspace",
                                 _ => id,
                             })
                             .strong(),
                         );
                         ui.label(
-                            RichText::new(if matches!(id, "zed" | "vscode") {
+                            RichText::new(if id == "local" {
                                 "Built-in Rust adapter"
                             } else {
                                 "External MCP process"

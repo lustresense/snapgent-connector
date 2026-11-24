@@ -40,7 +40,7 @@ impl StdioMcp {
                 command.arg(arg.as_str().context("MCP args must be strings")?);
             }
         }
-        let mut allowed: HashSet<String> = "PATH SYSTEMROOT WINDIR COMSPEC PATHEXT TEMP TMP USERPROFILE HOME APPDATA LOCALAPPDATA PROGRAMFILES PROGRAMFILES(X86) PROGRAMW6432 PROGRAMDATA SYSTEMDRIVE HOMEDRIVE HOMEPATH USERNAME LANG VSCODE_WORKSPACE_PATH VSCODE_WORKSPACE ZS_WORKSPACE ZS_ZED_WORKSPACE ZS_ZED_DB DISPLAY WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS".split_whitespace().map(str::to_owned).collect();
+        let mut allowed: HashSet<String> = "PATH SYSTEMROOT WINDIR COMSPEC PATHEXT TEMP TMP USERPROFILE HOME APPDATA LOCALAPPDATA PROGRAMFILES PROGRAMFILES(X86) PROGRAMW6432 PROGRAMDATA SYSTEMDRIVE HOMEDRIVE HOMEPATH USERNAME LANG DISPLAY WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS".split_whitespace().map(str::to_owned).collect();
         if let Some(inherit) = config.get("inherit_env") {
             for key in inherit.as_array().context("inherit_env must be an array")? {
                 allowed.insert(

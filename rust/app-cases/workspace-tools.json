@@ -1,7 +1,7 @@
 [
   {
     "name": "get_workspace_info",
-    "description": "Get the active VS Code workspace name, path, and Git status.",
+    "description": "Get the explicitly selected local workspace name, path, and Git repository status.",
     "inputSchema": {
       "type": "object",
       "properties": {},

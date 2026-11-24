@@ -14,11 +14,11 @@ async fn native_bridge_lifecycle() {
     let state = State::new(root.clone(), "ab".repeat(32), vec![]).unwrap();
     state.manager.start().await.unwrap();
     let snapshot = state.manager.snapshot().await;
-    assert_eq!(snapshot["servers"].as_array().unwrap().len(), 2);
+    assert_eq!(snapshot["servers"].as_array().unwrap().len(), 1);
     assert!(
         state
             .manager
-            .resolve("zed/read_file", Some("vscode"))
+            .resolve("local/read_file", Some("vscode"))
             .await
             .is_err()
     );
@@ -52,25 +52,25 @@ async fn explicit_workspace_binding_is_idempotent_and_isolated() {
     let sa = "11".repeat(32);
     let sb = "22".repeat(32);
     manager
-        .bind_session(&sa, "zed", Workspace::bound(Editor::Zed, &a).unwrap())
+        .bind_session(&sa, "local", Workspace::bound(Editor::Local, &a).unwrap())
         .await
         .unwrap();
     manager
-        .bind_session(&sa, "zed", Workspace::bound(Editor::Zed, &a).unwrap())
+        .bind_session(&sa, "local", Workspace::bound(Editor::Local, &a).unwrap())
         .await
         .unwrap();
     assert!(
         manager
-            .bind_session(&sa, "zed", Workspace::bound(Editor::Zed, &b).unwrap())
+            .bind_session(&sa, "local", Workspace::bound(Editor::Local, &b).unwrap())
             .await
             .is_err()
     );
     manager
-        .bind_session(&sb, "zed", Workspace::bound(Editor::Zed, &b).unwrap())
+        .bind_session(&sb, "local", Workspace::bound(Editor::Local, &b).unwrap())
         .await
         .unwrap();
     for (sid, content) in [(&sa, "A"), (&sb, "B")] {
-        let backend = manager.session_backend(sid, "zed").await.unwrap();
+        let backend = manager.session_backend(sid, "local").await.unwrap();
         snapgent_bridge::Manager::call(
             backend,
             "write_file".into(),
@@ -89,6 +89,6 @@ async fn explicit_workspace_binding_is_idempotent_and_isolated() {
         "B"
     );
     manager.release_session(&sa).await;
-    assert!(manager.session_backend(&sa, "zed").await.is_err());
+    assert!(manager.session_backend(&sa, "local").await.is_err());
     std::fs::remove_dir_all(root).unwrap();
 }

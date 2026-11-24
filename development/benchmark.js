@@ -46,7 +46,7 @@ function getProcessMetrics() {
 function connectAuthenticated() {
   return new Promise((resolve, reject) => {
     const t0 = performance.now();
-    const ws = new WebSocket(WS_URL, { headers: { Origin: ORIGIN } });
+    const ws = new WebSocket(WS_URL);
     const clientNonce = randomNonce();
     let authDone = 0;
 
@@ -143,7 +143,7 @@ async function runBenchmark() {
 
   await rpc(ws, {
     type: "workspace_bind",
-    server: "zed",
+    server: "local",
     session,
     workspace: tmpRoot
   });
@@ -156,9 +156,9 @@ async function runBenchmark() {
     const filename = `test_${i}.txt`;
     const res = await rpc(ws, {
       type: "call_tool",
-      server: "zed",
+      server: "local",
       session,
-      name: "zed/write_file",
+      name: "local/write_file",
       arguments: { path: filename, content: `Benchmark payload ${i}` }
     });
     toolLatencies.push(res.latencyMs);

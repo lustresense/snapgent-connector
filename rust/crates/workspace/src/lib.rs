@@ -25,10 +25,7 @@ impl Workspace {
     }
     pub fn bound(editor: Editor, root: &Path) -> Result<Self> {
         let mut workspace = Self::new(editor);
-        let root = fs::canonicalize(root)?;
-        if !root.is_dir() {
-            bail!("Workspace must be a directory");
-        }
+        let root = paths::local_root(root)?;
         workspace.fixed_root = Some(root);
         Ok(workspace)
     }
@@ -37,32 +34,25 @@ impl Workspace {
     }
     pub fn available(&self) -> bool {
         match &self.fixed_root {
-            Some(root) => fs::canonicalize(root).is_ok_and(|p| p == *root && p.is_dir()),
+            Some(root) => paths::local_root(root).is_ok_and(|p| p == *root),
             None => active_workspace(self.editor).is_ok(),
         }
     }
     pub fn tools(&self) -> Vec<Value> {
         let text = include_str!("../../../app-cases/workspace-tools.json");
         let data: Value = serde_json::from_str(text).expect("valid embedded tool schema");
-        let mut tools = data
+        let tools = data
             .as_array()
             .or_else(|| data["tools"].as_array())
             .expect("tool schema array")
             .clone();
-        if self.editor == Editor::Zed {
-            for tool in &mut tools {
-                if let Some(desc) = tool["description"].as_str() {
-                    tool["description"] = json!(desc.replace("VS Code", "Zed"));
-                }
-            }
-        }
         tools
     }
     pub fn call(&self, name: &str, args: &Value) -> Result<Value> {
         let candidate = match &self.fixed_root {
             Some(root) => {
-                let resolved = fs::canonicalize(root)?;
-                if resolved != *root || !resolved.is_dir() {
+                let resolved = paths::local_root(root)?;
+                if resolved != *root {
                     bail!("Bound workspace is no longer available");
                 }
                 resolved
@@ -288,8 +278,8 @@ mod tests {
         let b = dir.path().join("b");
         fs::create_dir(&a).unwrap();
         fs::create_dir(&b).unwrap();
-        let one = Workspace::bound(Editor::Zed, &a).unwrap();
-        let two = Workspace::bound(Editor::Zed, &b).unwrap();
+        let one = Workspace::bound(Editor::Local, &a).unwrap();
+        let two = Workspace::bound(Editor::Local, &b).unwrap();
         one.call("create_file", &json!({"path":"identity.txt","content":"A"}))
             .unwrap();
         two.call("create_file", &json!({"path":"identity.txt","content":"B"}))
@@ -332,7 +322,7 @@ mod tests {
     }
     #[test]
     fn workspace_schema_and_edit_contract() {
-        assert_eq!(Workspace::new(Editor::Zed).tools().len(), 28);
+        assert_eq!(Workspace::new(Editor::Local).tools().len(), 28);
         let dir = tempfile::tempdir().unwrap();
         let root = fs::canonicalize(dir.path()).unwrap();
         dispatch(

@@ -160,8 +160,7 @@ pub async fn handle(state: Arc<State>, session: &mut Session, request: Value) ->
         }
         "workspace_list" => {
             let editor = match request["server"].as_str() {
-                Some("zed") => Some(snapgent_workspace::Editor::Zed),
-                Some("vscode") => Some(snapgent_workspace::Editor::VsCode),
+                Some("local") => Some(snapgent_workspace::Editor::Local),
                 _ => None,
             };
             match editor {
@@ -182,8 +181,7 @@ pub async fn handle(state: Arc<State>, session: &mut Session, request: Value) ->
             let sid = request["session"].as_str().unwrap_or("");
             let server = request["server"].as_str().unwrap_or("");
             let editor = match server {
-                "zed" => Some(snapgent_workspace::Editor::Zed),
-                "vscode" => Some(snapgent_workspace::Editor::VsCode),
+                "local" => Some(snapgent_workspace::Editor::Local),
                 _ => None,
             };
             let requested = request["workspace"].as_str().map(std::path::PathBuf::from);
@@ -245,21 +243,27 @@ pub async fn handle(state: Arc<State>, session: &mut Session, request: Value) ->
             json!({"type":"tool_result","id":id,"ok":true})
         }
         "workspace_probe" => {
-            let editor = match request["server"].as_str() {
-                Some("zed") => Some(snapgent_workspace::Editor::Zed),
-                Some("vscode") => Some(snapgent_workspace::Editor::VsCode),
-                _ => None,
-            };
-            match editor {
-                Some(editor) => match tokio::task::spawn_blocking(move || {
-                    snapgent_workspace::active_workspace(editor)
-                })
-                .await
+            let sid = request["session"].as_str().unwrap_or("");
+            if request["server"].as_str() != Some("local") || !snapgent_security::valid_nonce(sid) {
+                error(
+                    &id,
+                    "workspace_required",
+                    "Select and approve a local workspace first",
+                )
+            } else if let Some(root) = state.manager.binding_root(sid, "local").await {
+                if snapgent_workspace::Workspace::bound(snapgent_workspace::Editor::Local, &root)
+                    .is_ok_and(|w| w.fixed_root() == Some(root.as_path()))
                 {
-                    Ok(Ok(_)) => json!({"type":"tool_result","id":id,"ok":true}),
-                    _ => error(&id, "tool_error", "Workspace unavailable"),
-                },
-                None => error(&id, "tool_error", "Unknown workspace editor"),
+                    json!({"type":"tool_result","id":id,"ok":true})
+                } else {
+                    error(&id, "tool_error", "Workspace unavailable")
+                }
+            } else {
+                error(
+                    &id,
+                    "workspace_unbound",
+                    "Select and approve a local workspace first",
+                )
             }
         }
         "call_tool" => call(state, session, request).await,
@@ -306,7 +310,7 @@ async fn call(state: Arc<State>, session: &mut Session, request: Value) -> Value
         Ok(v) => v,
         Err(e) => return error(id, "unknown_tool", e),
     };
-    if matches!(server.as_str(), "zed" | "vscode") {
+    if server == "local" {
         let Some(sid) = binding else {
             return error(
                 id,
@@ -319,7 +323,7 @@ async fn call(state: Arc<State>, session: &mut Session, request: Value) -> Value
             Err(e) => return error(id, "workspace_unbound", e),
         };
     }
-    if matches!(server.as_str(), "zed" | "vscode")
+    if server == "local"
         && matches!(
             bare.as_str(),
             "run_command"
@@ -328,12 +332,15 @@ async fn call(state: Arc<State>, session: &mut Session, request: Value) -> Value
                 | "git_commit"
                 | "git_add"
                 | "git_diff"
+                | "git_status"
+                | "git_log"
+                | "git_branches"
         )
         && !state
             .approvals
             .ask(
                 "Execute local workspace operation",
-                json!({"server":server,"tool":bare,"arguments":args}),
+                json!({"server":server,"workspace":match &backend { crate::manager::Backend::Builtin(w) => w.fixed_root().map(|p| p.to_string_lossy().into_owned()), _ => None },"tool":bare,"arguments":args}),
                 true,
             )
             .await

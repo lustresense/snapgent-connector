@@ -174,7 +174,7 @@
     try { chrome.storage.local.set({ [REMOTE_COMMANDS_KEY]: value }); } catch {}
     return value;
   }
-  let selectedTargetId = "none";
+  let selectedTargetId = "local";
   let targetChangedLocally = false;
   let resolveTargetReady;
   const targetReady = new Promise(resolve => { resolveTargetReady = resolve; });
@@ -185,10 +185,10 @@
       resolveTargetReady();
       if (targetChangedLocally) return;
       if (typeof saved === "string" && saved) {
-        selectedTargetId = saved;
+        selectedTargetId = ["zed", "vscode"].includes(saved) ? "local" : saved;
         refreshActiveToolNames();
         if (ui.setTarget) {
-          ui.setTarget(saved);
+          ui.setTarget(selectedTargetId);
           bg({ type: "status" }).then((status) => status && ui.setStatus(status));
         }
       }
@@ -215,9 +215,9 @@
   } catch (error) {
     console.warn("[snapgentV3] Could not load MCP toggles:", error);
   }
-  function isWorkspaceTarget(id = selectedTargetId) { return id === "vscode" || id === "zed"; }
+  function isWorkspaceTarget(id = selectedTargetId) { return id === "local"; }
   function isMcpEnabled(id) {
-    return mcpEnabled[id] !== false;
+    return id === "local" || mcpEnabled[id] !== false;
   }
   function setMcpEnabled(id, on) {
     mcpEnabled = { ...mcpEnabled, [id]: !!on };
@@ -426,15 +426,18 @@
       // "Landed" = a new turn appeared in the DOM. In long chats, list
       // virtualisation can keep counts flat even when our message landed - the
       // textarea-cleared signal below is the primary fast gate.
-      const landed = () => P.userCount() > preUser || P.assistantCount() > base;
+      const previousAssistantId = P.lastAssistantId ? P.lastAssistantId() : null;
+      const landed = () => {
+        if (P.userCount() > preUser || P.assistantCount() > base) return true;
+        const current = P.lastAssistantId ? P.lastAssistantId() : null;
+        return current != null && previousAssistantId != null && current !== previousAssistantId;
+      };
       // CRITICAL: never type/send while the tab is HIDDEN. Background tabs throttle
       // rendering, which made the landed-check unreliable and caused the SAME
       // feedback to be sent several times. Send ONLY while visible.
       let tries = 0;
       let messageSent = false;
-      const maxTries = Number.isInteger(P.sendRetryLimit) && P.sendRetryLimit > 0
-        ? P.sendRetryLimit
-        : 4;
+      const maxTries = 8;
       while (!messageSent && !landed() && tries < maxTries && !A.stop) {
         if (document.hidden) {
           diag("send.waitVisible", { tries });
@@ -442,7 +445,13 @@
         }
         await jitterBeforeSend();
         diag("submit.typeAndSend", { hasImages: !!(images && images.length) });
-        const typed = await P.typeAndSend(text, images);
+        let typed = false;
+        try {
+          if (landed() || A.stop) break;
+          typed = await P.typeAndSend(text, images);
+        } catch (e) {
+          diag("send.transientError", { tries, error: String(e.message || e) });
+        }
         // The provider returns false when it could not get the text into the
         // composer at all (ChatGPT replaces the ProseMirror node on every
         // remount, so an editor handle captured a moment earlier is detached
@@ -450,10 +459,12 @@
         // which the gate below used to count as "sent and cleared" - that is
         // the false positive that stranded Start on "Starting…" for minutes
         // with zero turns. Retry the send instead of believing it went out.
+        if (landed()) { messageSent = true; break; }
         if (typed === false) {
-          diag("send.emptyComposer", { tries });
+          if (await waitFor(landed, 2000)) { messageSent = true; break; }
+          diag("send.retry", { tries });
           tries++;
-          await sleep(250 + tries * 250);
+          await sleep(Math.min(8000, 500 * Math.pow(2, tries - 1)));
           if (A.stop) break;
           continue;
         }
@@ -469,10 +480,18 @@
         // The site clears the textarea as soon as the send is accepted - faster
         // and more reliable than waiting for a DOM turn count change.
         await waitFor(() => {
-          if (P.editorText().trim() === "") messageSent = true;
-          return messageSent || landed();
-        }, 3500);
+          if (landed()) messageSent = true;
+          return messageSent;
+        }, 8000);
         tries++;
+        if (!messageSent && !landed() && !A.stop) {
+          // An empty composer after a send is ambiguous: do not blindly resend.
+          if (!P.editorText().trim()) {
+            if (await waitFor(landed, 20000)) { messageSent = true; break; }
+            if (!P.editorText().trim()) throw new Error("Submission status uncertain; stopped to prevent duplicate messages.");
+          }
+          await sleep(Math.min(8000, 500 * Math.pow(2, tries - 1)));
+        }
       }
       if ((messageSent || landed()) && steering.length) steeringQueue.splice(0, steering.length);
       if (messageSent) diag("send.cleared", { tries });
@@ -484,8 +503,7 @@
       // themselves instead of watching a stuck bar.
       if (!messageSent && !landed() && !A.stop) {
         diag("send.failed", { tries });
-        ui.banner("warn", "Message could not be sent",
-          `Send "continue" to resume.`);
+        throw new Error("Automatic submission failed after " + tries + " attempts. Check the provider connection or send the pending composer message manually.");
       }
       return base;
     } finally {
@@ -1236,12 +1254,10 @@
         .filter((sv) => sv.id === selectedTargetId && isMcpEnabled(sv.id));
       const lines = servers.length
         ? servers.map((sv) => {
-            const label = sv.id === "vscode"
-              ? "VS Code"
-              : sv.id === "zed" ? "Zed" : sv.id === "roblox" ? "Roblox Studio" : `${sv.id} (addon)`;
+            const label = sv.id === "local" ? "Local Workspace" : sv.id === "roblox" ? "Roblox Studio" : `${sv.id} (addon)`;
             return `- ${sv.id}: ${label} - ${sv.alive ? `${sv.tools || 0} commands available` : "offline (no tools)"}`;
           })
-        : ["- vscode: VS Code - unknown (bridge did not report server health)"];
+        : ["- Selected backend unavailable"];
       return (
         `Output of 'list_mcp_servers':\n` +
         `Connected MCP servers (${lines.length}):\n${lines.join("\n")}\n` +
@@ -1253,7 +1269,7 @@
     // if the model explicitly asks via {"server": "<id>"} (see list_mcp_servers).
     if (name === "list_commands" || name === "list_tools") {
       await ensureTools();
-      const target = (selectedTargetId || "vscode").trim();
+      const target = (selectedTargetId || "local").trim();
       const asked = typeof args.server === "string" ? args.server.trim() : "";
       // Isolation: only the server selected in the dropdown can be listed. A request
       // for any other server gets a generic refusal that does not reveal whether that
@@ -2266,7 +2282,7 @@
   // workspace the model could read). VS Code: the skill files are installed into
   // .snapgent/skills/ (never overwriting) and the model reads them on demand.
   const ANTISLOP_KEY = "zsAntislopEnabled";
-  const ANTISLOP_TARGETS = ["word", "vscode", "zed"];
+  const ANTISLOP_TARGETS = ["word", "local"];
   let antislopEnabled = false; // off until the user turns it on
   try {
     chrome.storage.local.get(ANTISLOP_KEY, (r) => { antislopEnabled = !!(r && r[ANTISLOP_KEY]); });
@@ -2614,12 +2630,12 @@
                                // the model makes seconds later)
       if (!alive()) return;
       const selectedTools = activeTools();
-      const vscodeServer = (A.bridge && A.bridge.servers || []).find((server) => server.id === selectedTargetId);
+      const workspaceServer = (A.bridge && A.bridge.servers || []).find((server) => server.id === selectedTargetId);
       if (isWorkspaceTarget() && A.bridge && A.bridge.connected &&
-          vscodeServer && vscodeServer.alive &&
+          workspaceServer && workspaceServer.alive &&
           !selectedTools.some((tool) => bareToolName(tool.name) === "list_dir")) {
         ui.banner("warn", `${ui.getTargetName()} workspace required`,
-          `Open a project folder in ${ui.getTargetName()}, then try again.`);
+          `Choose a local workspace folder, then try again.`);
         return;
       }
       if (!activeTools().length) {
@@ -3628,14 +3644,13 @@
           <div class="zs-target-wrap" title="Choose which MCP server receives commands">
             <select id="zs-target" aria-label="MCP target" hidden tabindex="-1">
               <option value="none">None</option>
-              <option value="vscode">VS Code</option>
-              <option value="zed">Zed</option>
+              <option value="local">Local Workspace</option>
               <option value="roblox">Roblox Studio</option>
             </select>
             <button id="zs-target-btn" type="button" aria-haspopup="listbox" aria-label="Choose MCP target"><span id="zs-target-name"></span></button>
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
           </div>
-          <button id="zs-workspace" type="button" hidden title="Choose local workspace">Workspace</button>
+          
           <button id="zs-switch" aria-label="Switch AI and options" title="Switch AI and options"><span id="zs-switch-name"></span><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button>
           <button id="zs-bar-hide" type="button" aria-label="Hide status card" title="Hide status card"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 15 12 9 18 15"/></svg></button>
         </div>
@@ -3651,7 +3666,7 @@
       stopBtn = root.querySelector("#zs-stop");
       targetSelect = root.querySelector("#zs-target");
       targetBtn = root.querySelector("#zs-target-btn");
-      root.querySelector("#zs-workspace").addEventListener("click", chooseWorkspace);
+      
       targetMenuEl = root.querySelector("#zs-target-menu");
       switchBtn = root.querySelector("#zs-switch");
       hideBtn = root.querySelector("#zs-bar-hide");
@@ -3829,7 +3844,7 @@
     // addon servers actually exist. Self-heal the local display-name cache when
     // a configured server isn't already known.
     function mergedMcpServers() {
-      const live = ((A.bridge && A.bridge.servers) || []).filter((sv) => sv.id !== "roblox");
+      const live = ((A.bridge && A.bridge.servers) || []).filter((sv) => !["roblox", "local", "zed", "vscode"].includes(sv.id));
       const byId = new Map(customMcpServers.map((s) => [s.id, s]));
       const merged = live.map((sv) => {
         const cached = byId.get(sv.id);
@@ -3848,7 +3863,7 @@
       // yet (mid-restart) - still show it, health unknown, so it doesn't blink
       // out of the list during the few seconds the bridge is restarting.
       for (const s of customMcpServers) {
-        if (!merged.some((m) => m.id === s.id)) merged.push({ ...s, alive: undefined, tools: undefined });
+        if (!["local", "zed", "vscode"].includes(s.id) && !merged.some((m) => m.id === s.id)) merged.push({ ...s, alive: undefined, tools: undefined });
       }
       return merged;
     }
@@ -3856,8 +3871,7 @@
     function getTargetName(id = selectedTargetId) {
       if (id === "none") return "None";
       if (id === "roblox") return "Roblox Studio";
-      if (id === "vscode") return "VS Code";
-      if (id === "zed") return "Zed";
+      if (id === "local") return "Local Workspace";
       if (id === "effectcraft") return "EffectCraft";
       const server = mergedMcpServers().find((item) => item.id === id);
       return server ? server.name : id;
@@ -3872,17 +3886,13 @@
       workspaceChoosing = true;
       let pop;
       try {
-        const result = await bg({type:"workspace_list",server});
-        if (!result.ok || key !== workspaceKey()) { toast(result.error || "Update the native bridge to select workspaces."); return; }
+        if (!A.bridge.connected || !A.bridge.workspaceBinding) { toast("Connect the native Snapgent bridge first."); return; }
         pop = document.createElement("div");
         pop.id = "zs-workspace-picker";
-        pop.innerHTML = '<section role="dialog" aria-modal="true" aria-label="Choose workspace"><h3>Choose workspace</h3><p>Recent local folders (may not be open)</p><select aria-label="Recent workspace"></select><label>Local folder path<input type="text" placeholder="Absolute directory path"></label><div><button type="button" data-cancel>Cancel</button><button type="button" data-confirm>Use workspace</button></div><p role="status"></p></section>';
-        const select = pop.querySelector("select"), input = pop.querySelector("input"), status = pop.querySelector('[role="status"]');
-        const empty = document.createElement("option"); empty.value = ""; empty.textContent = "Choose a folder or enter its path"; select.appendChild(empty);
-        for (const folder of result.workspaces || []) { const o = document.createElement("option"); o.value = folder; o.textContent = folder; select.appendChild(o); }
+        pop.innerHTML = '<section role="dialog" aria-modal="true" aria-label="Choose workspace"><h3>Choose workspace</h3><p>Enter the absolute path of the folder you want to work in. No editor is required.</p><label>Local folder path<input type="text" placeholder="Absolute directory path"></label><div><button type="button" data-cancel>Cancel</button><button type="button" data-confirm>Use workspace</button></div><p role="status"></p></section>';
+        const input = pop.querySelector("input"), status = pop.querySelector('[role="status"]');
         const current = await loadWorkspaceChoice();
         if (current) input.value = current.workspace;
-        select.addEventListener("change",()=>{ if(select.value) input.value = select.value; });
         document.documentElement.appendChild(pop);
         input.focus();
         const chosen = await new Promise(resolve => {
@@ -3914,12 +3924,11 @@
       if (!targetSelect) return;
       const options = [
         { id: "none", name: "None" },
-        { id: "vscode", name: "VS Code" },
-        { id: "zed", name: "Zed" },
+        { id: "local", name: "Local Workspace" },
         { id: "roblox", name: "Roblox Studio" },
         { id: "effectcraft", name: "EffectCraft" },
         ...mergedMcpServers()
-          .filter((server) => !["vscode", "zed", "roblox", "effectcraft"].includes(server.id))
+          .filter((server) => !["local", "vscode", "zed", "roblox", "effectcraft"].includes(server.id))
           .map((server) => ({ id: server.id, name: getTargetName(server.id) })),
       ].filter((option) => option.id === "none" || isMcpEnabled(option.id));
       if (!options.some((option) => option.id === id)) {
@@ -3934,16 +3943,11 @@
       }
       targetSelect.value = id;
       targetSelect.disabled = !!(A.running || A.starting || A.injecting || A.toolRunning || A.stopping || workspaceChoosing);
-      const workspaceBtn = root.querySelector("#zs-workspace");
-      if (workspaceBtn) {
-        workspaceBtn.hidden = !isWorkspaceTarget(id) || !A.bridge.workspaceBinding;
-        workspaceBtn.disabled = targetSelect.disabled;
-        const choice = workspaceChoice && workspaceChoice.key === workspaceKey() ? workspaceChoice : null;
-        workspaceBtn.textContent = choice ? choice.workspace.split(/[\\/]/).filter(Boolean).pop() || "Workspace" : "Workspace";
-        workspaceBtn.title = choice ? choice.workspace : "Choose local workspace";
-      }
+      const choice = isWorkspaceTarget(id) && workspaceChoice && workspaceChoice.key === workspaceKey() ? workspaceChoice : null;
       const nameEl = root && root.querySelector("#zs-target-name");
-      if (nameEl) nameEl.textContent = (options.find((option) => option.id === id) || { name: id }).name;
+      if (nameEl) nameEl.textContent = isWorkspaceTarget(id) ? (choice ? choice.workspace.split(/[\\/]/).filter(Boolean).pop() || "Workspace" : "Choose Workspace") : (options.find((option) => option.id === id) || { name: id }).name;
+      targetBtn.disabled = targetSelect.disabled;
+      targetBtn.title = choice ? choice.workspace : "Choose workspace or integration";
       if (targetMenuEl && !targetMenuEl.hidden) renderTargetMenu();
     }
 
@@ -3958,14 +3962,17 @@
       targetMenuEl.dataset.menuKey = menuKey;
       const rows = [...targetSelect.options].map((o) => {
         const cur = o.value === selectedTargetId;
-        return `<button type="button" class="zs-site-opt zs-target-opt${cur ? " zs-target-cur" : ""}" data-id="${esc(o.value)}"><span class="zs-site-name"><span>${esc(o.textContent)}</span></span>${cur ? `<span class="zs-site-badge">active</span>` : ""}</button>`;
+        return `<button type="button" class="zs-site-opt zs-target-opt${cur ? " zs-target-cur" : ""}" data-id="${esc(o.value)}"><span class="zs-site-name"><span>${esc(o.value === "local" && cur ? "Change workspace folder…" : o.textContent)}</span></span>${cur ? `<span class="zs-site-badge">active</span>` : ""}</button>`;
       }).join("");
       targetMenuEl.innerHTML =
-        `<section class="zs-menu-sec"><div class="zs-sec-label"><span>MCP target</span></div>${rows}</section>`;
+        `<section class="zs-menu-sec"><div class="zs-sec-label"><span>Workspace & integrations</span></div>${rows}</section>`;
       targetMenuEl.querySelectorAll(".zs-target-opt").forEach((b) =>
         b.addEventListener("click", () => {
           targetMenuEl.hidden = true;
-          if (b.dataset.id === selectedTargetId) return;
+          if (b.dataset.id === selectedTargetId) {
+            if (isWorkspaceTarget()) chooseWorkspace();
+            return;
+          }
           targetSelect.value = b.dataset.id;
           targetSelect.dispatchEvent(new Event("change"));
         }));
@@ -3997,13 +4004,11 @@
     // ── MCP settings popup (toggle which servers are enabled) ───────────────
     function allMcpOptions() {
       const base = [
-        { id: "vscode", name: "VS Code" },
-        { id: "zed", name: "Zed" },
         { id: "roblox", name: "Roblox Studio" },
         { id: "effectcraft", name: "EffectCraft" },
       ];
       const extra = mergedMcpServers()
-        .filter((s) => !base.some((b) => b.id === s.id))
+        .filter((s) => !["local", "zed", "vscode"].includes(s.id) && !base.some((b) => b.id === s.id))
         .map((s) => ({ id: s.id, name: getTargetName(s.id) }));
       return [...base, ...extra];
     }
@@ -4133,7 +4138,7 @@
         if (mode !== "list") { renderImport(); return; }
         const rows = allSkills.length
           ? allSkills.map((s) => `<label class="zs-mcp-row"><span class="zs-mcp-row-info"><span class="zs-mcp-row-name">${esc(s.name)}</span><span class="zs-mcp-row-meta">${esc(s.description)}</span></span><input type="checkbox" class="zs-mcp-check" data-name="${esc(s.name)}" ${isSkillEnabled(s.name) ? "checked" : ""}><span class="zs-mcp-toggle"></span></label>`).join("")
-          : `<div class="zs-mcp-pop-note">No skills found in .snapgent/skills/ (VS Code or Zed workspace).</div>`;
+          : `<div class="zs-mcp-pop-note">No skills found in .snapgent/skills/ in the selected workspace.</div>`;
         pop.innerHTML =
           `<div class="zs-mcp-pop-card" role="dialog" aria-label="Skills settings">` +
             `<div class="zs-mcp-pop-head"><span>Skills</span><button class="zs-mcp-pop-close" aria-label="Close">&#10005;</button></div>` +
@@ -4177,7 +4182,7 @@
       const wsOk = isWorkspaceTarget();
       const row = (cls, attr, name, meta, checked, dim) =>
         `<label class="zs-mcp-row zs-skill-row${dim ? " zs-skill-dim" : ""}"${dim ? ' title="Not available for this MCP target"' : ""}><span class="zs-mcp-row-info"><span class="zs-mcp-row-name">${esc(name)}</span><span class="zs-mcp-row-meta">${esc(meta)}</span></span><input type="checkbox" class="zs-mcp-check ${cls}" ${attr} ${checked ? "checked" : ""} ${dim ? "disabled" : ""}><span class="zs-mcp-toggle"></span></label>`;
-      let rows = row("zs-antislop-check", "", "Antislop", "Natural writing in Word, no AI-slop code or design in VS Code or Zed", antislopEnabled, !antislopApplies());
+      let rows = row("zs-antislop-check", "", "Antislop", "Natural writing in Word, no AI-slop code or design in the local workspace", antislopEnabled, !antislopApplies());
       for (const s of allSkills) {
         if (bundled.includes(s.name)) continue;
         rows += row("zs-skill-check", `data-name="${esc(s.name)}"`, s.name, s.description, isSkillEnabled(s.name), !wsOk);
@@ -4413,7 +4418,7 @@
           actionBtn.title = "Select an MCP target first";
         } else {
           const selectedServer = (A.bridge.servers || []).find((item) => item.id === selectedTargetId);
-          const vscodeWorkspaceMissing = isWorkspaceTarget() &&
+          const localWorkspaceMissing = isWorkspaceTarget() &&
             !!A.bridge.connected && !!selectedServer && !!selectedServer.alive &&
             !(selectedServer.tools > 0);
           if (selectedTargetId !== "roblox" &&
@@ -4421,10 +4426,10 @@
             toneClass = "warn"; warn = true;
             msg = !A.bridge.connected
               ? `Run <b>start.bat</b>`
-              : isWorkspaceTarget() && (bridgeOk || vscodeWorkspaceMissing)
+              : isWorkspaceTarget() && (bridgeOk || localWorkspaceMissing)
                 ? workspaceProbePending
                   ? `Checking <b>${targetNameHtml()} workspace</b>…`
-                  : A.bridge.workspaceBinding ? `Choose a <b>workspace</b>` : `Open a <b>folder in ${targetNameHtml()}</b>`
+                  : `Choose a <b>workspace folder</b>`
                 : `<b>${targetNameHtml()} unavailable</b>`;
             label = `▶︎ Start`; kind = "start"; disabled = true;
           } else if (bridgeOk && (!isWorkspaceTarget() || workspaceReady)) {
@@ -4567,9 +4572,7 @@
               workspaceProbeFails += 1;
               return;
             }
-            const probe = s.workspaceBinding ? loadWorkspaceChoice().then(choice => ({ok:!!choice})) : bg({
-              type: "call_tool", name:workspaceTool.name, arguments:{path:"."}, server:selectedTargetId, timeout:5000
-            });
+            const probe = s.workspaceBinding ? loadWorkspaceChoice().then(choice => ({ok:!!choice})) : Promise.resolve({ok:false});
             return probe.then((result) => {
               workspaceReady = !!(result && result.ok);
               workspaceProbeFails = workspaceReady ? 0 : workspaceProbeFails + 1;
@@ -4577,7 +4580,7 @@
           }).catch((error) => {
             workspaceReady = false;
             workspaceProbeFails += 1;
-            console.warn("[snapgentV3] Could not verify editor workspace:", error);
+            console.warn("[snapgentV3] Could not verify local workspace:", error);
           }).finally(() => {
             workspaceProbePending = false;
             // Do NOT call renderBar() here: this block runs *inside* renderBar(),
@@ -5235,12 +5238,37 @@
     }
 
     function toast(msg) {
+      let stack = root.querySelector("#zs-toast-stack");
+      if (!stack) {
+        stack = document.createElement("div");
+        stack.id = "zs-toast-stack";
+        stack.setAttribute("role", "status");
+        stack.setAttribute("aria-live", "polite");
+        root.appendChild(stack);
+        const place = () => {
+          if (!stack.isConnected) return;
+          const anchor = bar && bar.getClientRects().length ? bar : dotBtn;
+          const rect = anchor && anchor.getClientRects().length ? anchor.getBoundingClientRect() : null;
+          const width = stack.offsetWidth;
+          const center = rect ? rect.left + rect.width / 2 : innerWidth / 2;
+          stack.style.left = Math.max(12, Math.min(center - width / 2, innerWidth - width - 12)) + "px";
+          stack.style.bottom = Math.max(12, rect ? innerHeight - rect.top + 8 : 96) + "px";
+          requestAnimationFrame(place);
+        };
+        requestAnimationFrame(place);
+      }
       const t = document.createElement("div");
       t.className = "zs-toast";
       t.textContent = msg;
-      root.appendChild(t);
-      setTimeout(() => t.classList.add("show"), 10);
-      setTimeout(() => { t.classList.remove("show"); setTimeout(() => t.remove(), 300); }, 3500);
+      stack.appendChild(t);
+      requestAnimationFrame(() => t.classList.add("show"));
+      setTimeout(() => {
+        t.classList.remove("show");
+        setTimeout(() => {
+          t.remove();
+          if (!stack.childElementCount) stack.remove();
+        }, 250);
+      }, 3500);
     }
 
     // Live "what it is doing right now" line under the cover label, fed by the

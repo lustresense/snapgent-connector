@@ -628,11 +628,12 @@ const ZSProvider = (() => {
   // Keyboard lock for a PM composer: stop the USER typing without touching
   // contenteditable (which would also disable execCommand for our injection).
   let _lockKeysBound = false;
+  const internalSendKeys = new WeakSet();
   function installLockKeydown() {
     if (_lockKeysBound) return;
     _lockKeysBound = true;
     document.addEventListener("keydown", (e) => {
-      if (!_locked) return;
+      if (!_locked || internalSendKeys.has(e)) return;
       const ed = getEditor();
       if (ed && ed.contains(e.target)) {
         e.preventDefault();
@@ -690,7 +691,10 @@ const ZSProvider = (() => {
   function pickSubmit(list, ed) {
     const arr = [].slice.call(list || []);
     if (!arr.length) return null;
-    const laidOut = arr.filter((b) => (b.getClientRects ? b.getClientRects().length > 0 : true));
+    const laidOut = arr.filter((b) => {
+      const r = b.getBoundingClientRect();
+      return b.isConnected && r.width > 0 && r.height > 0 && getComputedStyle(b).visibility !== "hidden";
+    });
     if (!laidOut.length) return null;
     const form = ed && ed.closest ? ed.closest("form") : null;
     if (form) {
@@ -1297,22 +1301,33 @@ const ZSProvider = (() => {
       }
       // Wait for the control to be in its SEND role (proof ProseMirror registered
       // the text, and that no generation is in flight).
-      await waitFor(() => !!sendButton(), 1500);
-      // Still not a send button? Either a generation really is running (in which
-      // case unwedge refuses and we fall through), or the control is stuck in its
-      // stop role with nothing generating - the case that stranded the result.
-      if (!sendButton()) await unwedgeStopPersistently();
+      const beforeUsers = userCount();
+      const accepted = () => userCount() > beforeUsers || !editorText().trim() || genActive();
+      await waitFor(() => { const b = sendButton(); return !!b && !b.disabled; }, 8000);
+      if (!sendButton() && !genActive()) await unwedgeStopPersistently();
+      if (accepted()) return true;
+      ed = getEditor();
+      if (!ed || !composerHolds(ed, text)) return false;
       const btn = sendButton();
-      // Disabled send = a quota wall, not a wedge. Clicking it does nothing and
-      // Enter is refused too, so return now and let scanError surface the reason
-      // instead of burning the caller's retries in silence.
-      if (btn && btn.disabled) { diag("send.disabled", {}); return false; }
-      if (btn) { btn.click(); return true; }
-      // Fallback: Enter sends in ChatGPT's composer.
-      const o = { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true };
-      ed.dispatchEvent(new KeyboardEvent("keydown", o));
-      ed.dispatchEvent(new KeyboardEvent("keyup", o));
-      return true;
+      if (btn && !btn.disabled && btn.getAttribute("aria-disabled") !== "true") {
+        btn.click();
+        if (await waitFor(accepted, 4000)) return true;
+      }
+      if (accepted()) return true;
+      if (genActive() || (sendButton() && sendButton().disabled)) return false;
+      ed = getEditor();
+      if (!ed || !composerHolds(ed, text)) return false;
+      // Allow only these exact internal keyboard events through our input lock.
+      ed.focus({ preventScroll: true });
+      const o = { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true, composed: true };
+      for (const kind of ["keydown", "keyup"]) {
+        const event = new KeyboardEvent(kind, o);
+        internalSendKeys.add(event);
+        ed.dispatchEvent(event);
+      }
+      const sent = await waitFor(accepted, 5000);
+      diag("send.fallbackVerified", { sent: !!sent });
+      return !!sent;
     } finally {
       if (relock) setEditable(false);
     }

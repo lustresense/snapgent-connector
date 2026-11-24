@@ -429,7 +429,7 @@ function pushFrame(frame) {
 // MCP server. Broadcasts only on change so the UI updates promptly but quietly.
 let studioProbing = false;
 async function refreshStudioStatus() {
-  if (studioProbing || !connected) return;
+  if (studioProbing || !connected || !serversCache.some(s => s.id === "roblox" && s.alive)) return;
   studioProbing = true;
   try {
     const r = await send({ type: "studio_status" }, 12000);
@@ -552,7 +552,7 @@ function broadcastStatus() {
 
 async function ensureWorkspaceBound(msg, force = false) {
   const { server, session, workspace } = msg;
-  if (!["zed","vscode"].includes(server) || !validCredential(session) || typeof workspace !== "string" || !workspace.trim())
+  if (server !== "local" || !validCredential(session) || typeof workspace !== "string" || !workspace.trim())
     return { ok:false, kind:"workspace_required", error:"Choose a workspace in the Snapgent bar.", sent:false };
   const key = server + ":" + session;
   if (!force && boundSessions.get(key) === workspace) return { ok:true, text:workspace };
@@ -640,12 +640,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       }
       case "call_tool": {
         const timeout = (msg.timeout || 120000) + 10000;
-        const editor = ["zed","vscode"].includes(msg.server);
+        const localWorkspace = msg.server === "local";
         const payload = {type:"call_tool", name:msg.name, arguments:msg.arguments, timeout:msg.timeout, server:msg.server, turn:msg.turn};
-        if (editor) {
+        if (localWorkspace) {
           const capability = await waitWorkspaceCapability();
           if (capability === null) { sendResponse({ok:false,kind:"disconnected",sent:false,error:"Waiting for the authenticated workspace catalogue."}); break; }
-          if (capability || msg.workspace) {
+          {
             if (!capability) { sendResponse({ok:false,kind:"workspace_required",sent:false,error:"Rebuild and restart the native bridge before using a saved workspace."}); break; }
             const bound = await ensureWorkspaceBound(msg);
             if (!bound.ok) { sendResponse({...bound,sent:false}); break; }

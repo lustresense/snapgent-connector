@@ -37,9 +37,7 @@ function randomNonce() {
 // Connect to bridge and complete HMAC authentication
 function connectAuthenticated() {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(WS_URL, {
-      headers: { Origin: ORIGIN }
-    });
+    const ws = new WebSocket(WS_URL);
 
     const clientNonce = randomNonce();
     let authenticated = false;
@@ -130,7 +128,7 @@ async function runTests() {
   console.log("\n[Test 3] Verifying 28 Zed tools and schemas...");
   const toolsResp = await rpc(ws, { type: "list_tools" });
   const allTools = toolsResp.tools || [];
-  const zedTools = allTools.filter(t => t.name.startsWith("zed/") || (t.server === "zed"));
+  const zedTools = allTools.filter(t => t.name.startsWith("local/") || t.name.startsWith("zed/") || t.server === "local" || t.server === "zed");
   console.log(`Found ${zedTools.length} Zed tools.`);
   assert.equal(zedTools.length, 28, "Must expose exactly 28 Zed tools");
 
@@ -144,7 +142,7 @@ async function runTests() {
   ];
 
   for (const toolName of expectedZedTools) {
-    const found = zedTools.some(t => t.name === `zed/${toolName}` || t.name === toolName);
+    const found = zedTools.some(t => t.name === `local/${toolName}` || t.name === toolName);
     assert(found, `Missing expected Zed tool: ${toolName}`);
   }
   console.log("PASS: All 28 Zed tools are present with valid schema");
@@ -166,7 +164,7 @@ async function runTests() {
   console.log("\n[Test 5] Explicit workspace binding and isolation...");
   const bindRespA = await rpc(ws, {
     type: "workspace_bind",
-    server: "zed",
+    server: "local",
     session: sessionA,
     workspace: wsA
   });
@@ -174,7 +172,7 @@ async function runTests() {
 
   const bindRespB = await rpc(ws, {
     type: "workspace_bind",
-    server: "zed",
+    server: "local",
     session: sessionB,
     workspace: wsB
   });
@@ -183,9 +181,9 @@ async function runTests() {
   // Write file in workspace A via Session A
   const writeA = await rpc(ws, {
     type: "call_tool",
-    server: "zed",
+    server: "local",
     session: sessionA,
-    name: "zed/write_file",
+    name: "local/write_file",
     arguments: { path: "identity.txt", content: "Content of Workspace A" }
   });
   assert.equal(writeA.ok, true, `Write A failed: ${writeA.error}`);
@@ -193,9 +191,9 @@ async function runTests() {
   // Write file in workspace B via Session B
   const writeB = await rpc(ws, {
     type: "call_tool",
-    server: "zed",
+    server: "local",
     session: sessionB,
-    name: "zed/write_file",
+    name: "local/write_file",
     arguments: { path: "identity.txt", content: "Content of Workspace B" }
   });
   assert.equal(writeB.ok, true, `Write B failed: ${writeB.error}`);
@@ -211,7 +209,7 @@ async function runTests() {
   console.log("\n[Test 6] Rejection of conflicting binding on same session...");
   const conflictResp = await rpc(ws, {
     type: "workspace_bind",
-    server: "zed",
+    server: "local",
     session: sessionA,
     workspace: wsB
   });
@@ -223,7 +221,7 @@ async function runTests() {
   const sessionA2 = randomNonce();
   const bindRespA2 = await rpc(ws, {
     type: "workspace_bind",
-    server: "zed",
+    server: "local",
     session: sessionA2,
     workspace: wsA
   });
@@ -231,9 +229,9 @@ async function runTests() {
 
   const readA2 = await rpc(ws, {
     type: "call_tool",
-    server: "zed",
+    server: "local",
     session: sessionA2,
-    name: "zed/read_file",
+    name: "local/read_file",
     arguments: { path: "identity.txt" }
   });
   assert.equal(readA2.ok, true);
@@ -244,9 +242,9 @@ async function runTests() {
   console.log("\n[Test 8] Tool execution response validity (no Not Run / Loading hang)...");
   const listResp = await rpc(ws, {
     type: "call_tool",
-    server: "zed",
+    server: "local",
     session: sessionA,
-    name: "zed/list_dir",
+    name: "local/list_dir",
     arguments: { path: "." }
   });
   assert.equal(listResp.ok, true);
@@ -258,20 +256,20 @@ async function runTests() {
   const turnId = "turn_12345";
   const call1 = await rpc(ws, {
     type: "call_tool",
-    server: "zed",
+    server: "local",
     session: sessionA,
     turn: turnId,
-    name: "zed/read_file",
+    name: "local/read_file",
     arguments: { path: "identity.txt" }
   });
   assert.equal(call1.ok, true);
 
   const callDuplicate = await rpc(ws, {
     type: "call_tool",
-    server: "zed",
+    server: "local",
     session: sessionA,
     turn: turnId,
-    name: "zed/read_file",
+    name: "local/read_file",
     arguments: { path: "identity.txt" }
   });
   assert.equal(callDuplicate.ok, true);
@@ -287,7 +285,7 @@ async function runTests() {
   // Re-bind same session A to workspace A
   const rebindResp = await rpc(ws2, {
     type: "workspace_bind",
-    server: "zed",
+    server: "local",
     session: sessionA,
     workspace: wsA
   });
@@ -295,9 +293,9 @@ async function runTests() {
 
   const readAfterReconnect = await rpc(ws2, {
     type: "call_tool",
-    server: "zed",
+    server: "local",
     session: sessionA,
-    name: "zed/read_file",
+    name: "local/read_file",
     arguments: { path: "identity.txt" }
   });
   assert.equal(readAfterReconnect.ok, true);

@@ -26,7 +26,7 @@ pub const IGNORED: &[&str] = &[
 pub struct WorkspacePin(Option<PathBuf>);
 impl WorkspacePin {
     pub fn pin(&mut self, candidate: &Path) -> Result<PathBuf> {
-        let candidate = fs::canonicalize(candidate).context("Workspace unavailable")?;
+        let candidate = local_root(candidate).context("Workspace unavailable")?;
         if !candidate.is_dir() {
             bail!("Workspace must be a directory.");
         }
@@ -78,9 +78,9 @@ pub fn target(root: &Path, input: &str) -> Result<PathBuf> {
                                     | "7"
                                     | "8"
                                     | "9"
-                                    | "Â¹"
-                                    | "Â²"
-                                    | "Â³"
+                                    | "¹"
+                                    | "²"
+                                    | "³"
                             )
                         ))
                 {
@@ -89,31 +89,27 @@ pub fn target(root: &Path, input: &str) -> Result<PathBuf> {
             }
         }
     }
-    let root = fs::canonicalize(root)?;
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        root.join(path)
-    };
-    let mut current = PathBuf::new();
-    for component in absolute.components() {
-        match component {
-            Component::CurDir => {}
-            Component::Prefix(_) | Component::RootDir => {
-                current.push(component.as_os_str());
-            }
-            Component::ParentDir => {
-                if !current.pop() {
-                    bail!("Path escapes workspace root");
+    // Validate every component before touching the filesystem. Never probe an
+    // absolute, device, UNC or parent-relative path supplied by an agent.
+    if path
+        .components()
+        .any(|c| !matches!(c, Component::Normal(_) | Component::CurDir))
+    {
+        bail!("Use a workspace-relative path without parent traversal");
+    }
+    let root = local_root(root)?;
+    let mut current = root.clone();
+    for component in path.components() {
+        if let Component::Normal(name) = component {
+            current.push(name);
+            match fs::symlink_metadata(&current) {
+                Ok(meta) => {
+                    if is_link_or_reparse(&meta) {
+                        bail!("Symbolic links and reparse points are not permitted");
+                    }
                 }
-            }
-            other => {
-                current.push(other.as_os_str());
-                match fs::symlink_metadata(&current) {
-                    Ok(_) => current = fs::canonicalize(&current)?,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e.into()),
-                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
             }
         }
     }
@@ -134,6 +130,64 @@ pub fn relative(root: &Path, path: &Path) -> String {
     } else {
         relative
     }
+}
+
+fn is_link_or_reparse(meta: &fs::Metadata) -> bool {
+    if meta.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if meta.file_attributes() & 0x400 != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+pub fn local_root(path: &Path) -> Result<PathBuf> {
+    if !path.is_absolute() {
+        bail!("Select an absolute local directory");
+    }
+    #[cfg(windows)]
+    {
+        use std::path::Prefix;
+        match path.components().next() {
+            Some(Component::Prefix(p))
+                if matches!(p.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)) => {}
+            _ => bail!("Network shares and device paths are not supported in local mode"),
+        }
+    }
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => bail!("Parent traversal in workspace path is not permitted"),
+            Component::CurDir => {}
+            Component::Normal(name) => {
+                current.push(name);
+                let meta = fs::symlink_metadata(&current)?;
+                if is_link_or_reparse(&meta) || !meta.is_dir() {
+                    bail!("Workspace path must contain only real directories");
+                }
+            }
+            other => current.push(other.as_os_str()),
+        }
+    }
+    let root = fs::canonicalize(&current)?;
+    if !root.is_dir() {
+        bail!("Workspace must be a directory");
+    }
+    #[cfg(windows)]
+    {
+        use std::path::Prefix;
+        match root.components().next() {
+            Some(Component::Prefix(p))
+                if matches!(p.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)) => {}
+            _ => bail!("Resolved workspace is not a local drive path"),
+        }
+    }
+    Ok(root)
 }
 
 pub fn safe_directory(path: &Path) -> bool {
