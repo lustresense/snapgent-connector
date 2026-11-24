@@ -5,6 +5,10 @@ $Manifest = Join-Path $Root 'rust/Cargo.toml'
 $Output = Join-Path $Root $(if ($Candidate) { 'dist/candidate' } else { 'dist/native' })
 Push-Location $Root
 try {
+    Get-ChildItem (Join-Path $Root 'snapgent-extension') -Filter 'test-*.js' | ForEach-Object {
+        node $_.FullName
+        if ($LASTEXITCODE -ne 0) { throw "Extension test failed: $($_.Name)" }
+    }
     cargo fmt --manifest-path $Manifest --all
     if ($LASTEXITCODE -ne 0) { throw 'Formatting failed' }
     cargo fmt --manifest-path $Manifest --all -- --check

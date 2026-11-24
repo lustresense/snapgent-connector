@@ -20,7 +20,7 @@ function render(s) {
   const dot = document.getElementById("dot");
   dot.className = "dot " + (!s.connected ? "bad" : ok ? "ok" : "warn");
   state.textContent = s.connected
-    ? (ok ? "Connected" : "No active backend")
+    ? (ok ? "Desktop connected" : "No active backend")
     : s.connectionState === "upgrade_required" ? "Old bridge rejected" : s.connectionState === "pairing_required" ? "Pairing required" : s.connectionState === "authenticating" ? "Authenticating…" : s.connectionState === "connecting" ? "Connecting…" : "Bridge offline";
   const ver = document.getElementById("ver");
   const extVer = chrome.runtime.getManifest().version;

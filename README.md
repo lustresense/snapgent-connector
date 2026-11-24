@@ -27,7 +27,7 @@ No running code editor is required. Choose an absolute local folder before start
 
 ### Upgrading from an older bridge
 
-Close any old Snapgent windows or tray instances first. If a previous headless executable is still listening, check its process path and command line in Task Manager and stop only that known Snapgent instance before rebuilding. The new extension rejects legacy bridges instead of displaying them as connected. The new executable has no headless listener or hide-to-tray mode; legacy CLI flags open the UI.
+After pulling the latest source, run `powershell -File development/update-native.ps1` to inspect and stop old processes from this checkout with confirmation, then rebuild. Close any old Snapgent windows or tray instances first. If a previous headless executable is still listening, check its process path and command line in Task Manager and stop only that known Snapgent instance before rebuilding. The new extension rejects legacy bridges instead of displaying them as connected. The new executable has no headless listener or hide-to-tray mode; legacy CLI flags open the UI.
 
 ## Supported providers
 

@@ -101,7 +101,16 @@ async fn authenticate(socket: &mut WebSocket, state: &State) -> Result<()> {
     Ok(())
 }
 async fn client(mut socket: WebSocket, state: Arc<State>) {
-    if authenticate(&mut socket, &state).await.is_err() {
+    let mut closing = state.shutdown.subscribe();
+    let authenticated = if *closing.borrow() {
+        false
+    } else {
+        tokio::select! {
+            _ = closing.changed() => false,
+            result = authenticate(&mut socket, &state) => result.is_ok(),
+        }
+    };
+    if !authenticated {
         let _ = socket.close().await;
         return;
     }
@@ -140,6 +149,7 @@ async fn client(mut socket: WebSocket, state: Arc<State>) {
         }
     }
     tasks.abort_all();
+    let _ = tokio::time::timeout(Duration::from_millis(500), writer.send(Message::Close(None))).await;
     state.events.log("Local client disconnected");
 }
 
@@ -203,7 +213,7 @@ async fn status(AxumState(state): AxumState<Arc<State>>, headers: HeaderMap) -> 
         return response;
     }
     let mut data = state.events.snapshot();
-    data["version"] = json!("3.9.14");
+    data["version"] = json!("3.9.15");
     secure(Json(data).into_response())
 }
 async fn events(

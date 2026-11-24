@@ -2826,7 +2826,7 @@ dependencies = [
 
 [[package]]
 name = "snapgent"
-version = "3.9.14"
+version = "3.9.15"
 dependencies = [
  "anyhow",
  "eframe",
@@ -2839,7 +2839,7 @@ dependencies = [
 
 [[package]]
 name = "snapgent-bridge"
-version = "3.9.14"
+version = "3.9.15"
 dependencies = [
  "anyhow",
  "axum",
@@ -2856,7 +2856,7 @@ dependencies = [
 
 [[package]]
 name = "snapgent-mcp"
-version = "3.9.14"
+version = "3.9.15"
 dependencies = [
  "anyhow",
  "serde",
@@ -2866,7 +2866,7 @@ dependencies = [
 
 [[package]]
 name = "snapgent-security"
-version = "3.9.14"
+version = "3.9.15"
 dependencies = [
  "anyhow",
  "base64",
@@ -2880,7 +2880,7 @@ dependencies = [
 
 [[package]]
 name = "snapgent-workspace"
-version = "3.9.14"
+version = "3.9.15"
 dependencies = [
  "anyhow",
  "glob",

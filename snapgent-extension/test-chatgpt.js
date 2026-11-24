@@ -256,6 +256,7 @@ ok("command in DilResponseRoot reply is parsed", dilReplyCalls.length === 1 && d
 // ProseMirror #prompt-textarea. It still needs the bar anchor and send path.
 const composerForm = { closest: () => null, contains: (node) => node === submitControl };
 const mobileComposer = Object.assign(new StubTextArea(), {
+  isConnected: true,
   tagName: "TEXTAREA",
   id: "mobile-composer-prompt",
   offsetParent: {},

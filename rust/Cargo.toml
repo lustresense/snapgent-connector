@@ -3,7 +3,7 @@ resolver = "2"
 members = ["app", "crates/bridge", "crates/mcp", "crates/workspace", "crates/security"]
 
 [workspace.package]
-version = "3.9.14"
+version = "3.9.15"
 edition = "2024"
 license = "GPL-3.0-or-later"
 

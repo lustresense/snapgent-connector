@@ -217,7 +217,7 @@ impl Manager {
                 catalog.push(json!({"name":name,"server":id,"description":tool.get("description").cloned().unwrap_or(json!("")),"inputSchema":tool.get("inputSchema").cloned().unwrap_or(json!({"type":"object","properties":{}}))}));
             }
         }
-        json!({"type":"connected","bridge_version":"3.9.14","workspace_binding":true,"mcp_alive":alive,"tools":catalog,"servers":statuses})
+        json!({"type":"connected","bridge_version":"3.9.15","workspace_binding":true,"mcp_alive":alive,"tools":catalog,"servers":statuses})
     }
     pub async fn bind_session(
         &self,
