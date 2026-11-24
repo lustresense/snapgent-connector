@@ -667,7 +667,8 @@ const ZSProvider = (() => {
       await waitFor(() => !canSend() || !!sendButton(), 8000);
       if (!canSend() || !editorText().trim() || isHardGenerating()) return false;
       const btn = sendButton();
-      if (btn && (btn.disabled || btn.getAttribute("aria-disabled") === "true")) return false;
+      // The adapter hides disabled controls; absence is not permission to bypass it.
+      if (!btn || btn.disabled || btn.getAttribute("aria-disabled") === "true") return false;
       if (btn && attempt % 2 === 0) { btn.click(); return true; }
       if (!canSend()) return false;
       // Fallback: Enter key
