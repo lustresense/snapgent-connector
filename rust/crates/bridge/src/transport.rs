@@ -152,9 +152,13 @@ async fn client(mut socket: WebSocket, state: Arc<State>) {
                             .filter(|s| snapgent_security::valid_nonce(s))
                             .zip(request["call_id"].as_str().filter(|s| !s.is_empty() && s.len() <= 128))
                             .map(|(session, call)| (session.to_owned(), call.to_owned()));
-                        if kind == "cancel_tool" {
+                        if kind == "recover_tool" {
+                            let response = state.receipts.recover(&request).await;
+                            let _ = writer.send(Message::Text(response.to_string().into())).await;
+                        } else if kind == "cancel_tool" {
+                            let receipt_cancelled = state.receipts.cancel(&request).await;
                             let cancelled = call_key.and_then(|key| calls.remove(&key));
-                            let found = cancelled.is_some();
+                            let found = receipt_cancelled || cancelled.is_some();
                             if let Some((task, id)) = cancelled {
                                 task.abort();
                                 let _ = writer.send(Message::Text(json!({"type":"tool_result","id":id,"ok":false,"kind":"cancelled","error":"Cancellation requested; verify partial changes"}).to_string().into())).await;
@@ -169,18 +173,27 @@ async fn client(mut socket: WebSocket, state: Arc<State>) {
                                 let session = sessions.entry(key).or_insert_with(|| Arc::new(Mutex::new(Session::default()))).clone();
                                 let state = state.clone();
                                 let tx = tx.clone();
-                                let id = request["id"].clone();
-                                let task = tasks.spawn(async move {
-                                    let mut session = session.lock().await;
-                                    if let Some(response) = protocol::handle(state, &mut session, request).await {
+                                if request["server"] == "local" && call_key.is_some() {
+                                    // The socket waiter is disposable; the receipt owns execution.
+                                    tasks.spawn(async move {
+                                        let response = state.receipts.start(state.clone(), session, request).await;
                                         let _ = tx.send(response).await;
-                                    }
-                                });
-                                if let Some(key) = call_key { calls.insert(key, (task, id)); }
+                                    });
+                                } else {
+                                    let id = request["id"].clone();
+                                    let task = tasks.spawn(async move {
+                                        let mut session = session.lock().await;
+                                        if let Some(response) = protocol::handle(state, &mut session, request).await {
+                                            let _ = tx.send(response).await;
+                                        }
+                                    });
+                                    if let Some(key) = call_key { calls.insert(key, (task, id)); }
+                                }
                             }
                         } else if tasks.len() < 34 {
                             if kind == "workspace_release" {
                                 if let Some(key) = request["session"].as_str() {
+                                    state.receipts.cancel_session(key).await;
                                     if !calls.keys().any(|(session, _)| session == key) {
                                         sessions.remove(key);
                                     }

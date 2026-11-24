@@ -1021,7 +1021,7 @@
   // Every user meets this eventually - Chrome auto-updates extensions under
   // open tabs - so it is worth its own message.
   const isContextInvalidated = (m) =>
-    /Extension context invalidated|Receiving end does not exist|message port closed/i.test(m || "");
+    /Extension context invalidated/i.test(m || "");
 
 
   let workspaceChoice = null;
@@ -1236,8 +1236,13 @@
       if (!probeOk) {
         // One more chance: a socket that was mid-reconnect on the first attempt
         // is usually settled a couple of seconds later.
-        probe = await probeOnce(8000);
-        probeOk = probe && (probe.ok !== false) && probe.kind !== "disconnected" && probe.kind !== "timeout";
+        const until = Date.now() + 30000;
+        while (!A.stop && Date.now() < until && !probeOk) {
+          if (probe && probe.kind === "stale-extension") break;
+          await sleep(800);
+          probe = await probeOnce(8000);
+          probeOk = !!(probe && probe.ok === true);
+        }
       }
       if (!probeOk) {
         diag("bridge.preflightFail", { name, kind: (probe && probe.kind) || "none" });
@@ -1408,23 +1413,28 @@
     }
     if (A.stop || (dispatchConversation && P.conversationKey() !== dispatchConversation)) return "ERROR: command not run - stopped or conversation changed.";
     const workspaceFields = boundWorkspace ? {workspace:boundWorkspace.workspace,session:boundWorkspace.session} : {};
-    const timeout = name === "execute_luau" ? 20000 : 120000;
+    const timeout = boundWorkspace && ["run_tests","run_project_script"].includes(bareName) ? 300000 : name === "execute_luau" ? 20000 : 120000;
     const callId = `tool-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const dispatchTool = async () => {
       let deadline, stopTimer;
       const stopped = () => A.stop || (dispatchConversation && P.conversationKey() !== dispatchConversation);
       if (stopped()) return {ok:false,kind:"stopped",sent:false};
       const hardCap = new Promise(resolve => {
-        deadline = setTimeout(() => resolve({ok:false,kind:"timeout",error:"no response from the extension worker"}), timeout + (boundWorkspace ? 135000 : 30000));
+        deadline = setTimeout(() => resolve({ok:false,kind:"timeout",error:"no response from the extension worker"}), timeout + (boundWorkspace ? 540000 : 30000));
       });
       const stopWatch = new Promise(resolve => {
         stopTimer = setInterval(() => { if (stopped()) resolve({ok:false,kind:"stopped"}); }, 120);
       });
       try {
-        const result = await Promise.race([
+        let result = await Promise.race([
           bg({type:"call_tool",name,arguments:args,timeout,server: selectedTargetId, turn: turnKeyForCache, call_id: callId,...workspaceFields}),
           hardCap, stopWatch
         ]);
+        // A service-worker messaging channel can disappear independently of
+        // the native call. Recover the receipt through the next worker.
+        if (boundWorkspace && result && result.kind === "disconnected" && result.sent !== false && !stopped()) {
+          result = await Promise.race([bg({type:"recover_tool",session:boundWorkspace.session,call_id:callId}),hardCap,stopWatch]);
+        }
         if (boundWorkspace && result && ["stopped","timeout"].includes(result.kind)) {
           bg({type:"cancel_tool",session:boundWorkspace.session,call_id:callId}).catch(() => {});
         }
@@ -1576,6 +1586,9 @@
         });
         return ZS.FEEDBACK.bridgeOffline;
       }
+    }
+    if (r.kind === "outcome_unknown") {
+      return ZSGuard.inFlightFailure(name);
     }
     if (r.kind === "timeout" && r.sent !== false) {
       ui.banner("warn", "Tool outcome unknown", `Check whether ${name} completed before retrying.`);
@@ -4722,8 +4735,8 @@
       if (bridgeBannerEl) return; // already shown
       const b = document.createElement("div");
       b.className = "zs-banner limit";
-      b.innerHTML = `<div class="zs-banner-t">⚠ snapgentV3 disconnected</div>
-        <div class="zs-banner-m">Bridge stopped. Run start.bat and keep the selected target app open.</div>
+      b.innerHTML = `<div class="zs-banner-t">Reconnecting to Snapgent</div>
+        <div class="zs-banner-m">The extension retries automatically. Keep the desktop application open.</div>
         <div class="zs-banner-acts"><button class="zs-banner-x">Close</button></div>`;
       b.querySelector(".zs-banner-x").addEventListener("click", () => { b.remove(); if (bridgeBannerEl === b) bridgeBannerEl = null; });
       root.appendChild(b);
@@ -5668,6 +5681,9 @@
       diag("bridge.staleExtension", { via: "status", error: s.error });
       return;
     }
+    // A messaging-port interruption is not an extension update. The next
+    // poll can reconnect; do not destroy the live session or demand F5.
+    if (typeof s.connected !== "boolean") return;
     ui.setStatus(s);
   }
   // Hydrate the persisted re-statement budget for this conversation up front, so

@@ -31,3 +31,5 @@ Keep the bridge credential private. On Windows it is stored in `%LOCALAPPDATA%/S
 ## Verification
 
 Run the native workspace tests and extension tests before deploying changes. Source-level checks and unit tests do not establish live compatibility with every AI website.
+
+Local call recovery uses a bounded in-memory receipt journal in the running bridge. A transient socket disconnect does not cancel a dispatched local command; the extension queries its original receipt after authentication. Missing or evicted receipts and a full bridge restart are reported as unknown, never replayed blindly. Stop and closing the bridge still request cancellation. External MCP calls are not covered by this receipt recovery.

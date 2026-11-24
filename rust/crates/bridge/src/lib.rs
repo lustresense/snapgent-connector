@@ -3,6 +3,7 @@ mod approval;
 mod events;
 mod manager;
 mod protocol;
+mod recovery;
 mod transport;
 use anyhow::{Context, Result};
 pub use approval::{Approval, Approvals};
@@ -20,6 +21,7 @@ pub struct State {
     origins: Vec<String>,
     catalog: broadcast::Sender<Value>,
     shutdown: watch::Sender<bool>,
+    receipts: recovery::Receipts,
 }
 impl State {
     pub fn new(root: PathBuf, token: String, origins: Vec<String>) -> Result<Arc<Self>> {
@@ -41,6 +43,7 @@ impl State {
             origins,
             catalog,
             shutdown,
+            receipts: recovery::Receipts::default(),
         }))
     }
     pub fn publish_catalog(&self, value: Value) {

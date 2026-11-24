@@ -96,6 +96,7 @@ let mcpAlive = false;
 let serversCache = [];
 let bridgeVersion = null;
 let workspaceBinding = null;
+let callRecovery = false;
 const boundSessions = new Map();
 const bindingRequests = new Map();
 // true/false = a PLACE is loaded and usable in Roblox Studio; null = unknown.
@@ -170,6 +171,7 @@ function connect() {
   ws = socket;
   connected = false;
   workspaceBinding = null;
+  callRecovery = false;
   boundSessions.clear();
   bindingRequests.clear();
   connectionState = "connecting";
@@ -263,6 +265,7 @@ function connect() {
     toolsCache = [];
     bridgeVersion = null;
     workspaceBinding = null;
+    callRecovery = false;
     boundSessions.clear();
     bindingRequests.clear();
     stopHeartbeat();
@@ -447,6 +450,7 @@ function handleBridgeMessage(msg) {
   if (msg.type === "connected") {
     bridgeVersion = typeof msg.bridge_version === "string" ? msg.bridge_version : null;
     workspaceBinding = msg.workspace_binding === true;
+    callRecovery = msg.call_recovery === true;
     mcpAlive = !!msg.mcp_alive;
     if (Array.isArray(msg.tools)) toolsCache = msg.tools;
     if (Array.isArray(msg.servers)) serversCache = msg.servers;
@@ -459,6 +463,7 @@ function handleBridgeMessage(msg) {
   }
   if (msg.type === "tools") {
     if (typeof msg.workspace_binding === "boolean") workspaceBinding = msg.workspace_binding;
+    if (typeof msg.call_recovery === "boolean") callRecovery = msg.call_recovery;
     if (Array.isArray(msg.tools)) toolsCache = msg.tools;
     if (Array.isArray(msg.servers)) serversCache = msg.servers;
     mcpAlive = !!msg.mcp_alive;
@@ -524,11 +529,9 @@ async function verifyStatus() {
     const socket = ws;
     const probe = (async () => {
       const pong = await send({ type: "ping" }, 2000).catch(() => null);
-      if (ws === socket && !(pong && pong.ok)) {
-        connected = false;
-        connectionState = "offline";
-        try { socket.close(); } catch {}
-      }
+      // Status UI must not tear down a healthy socket on one slow pong.
+      // Heartbeat owns reconnect and tests stale sockets independently.
+      if (ws === socket && !(pong && pong.ok)) log("status probe delayed; heartbeat will verify");
     })();
     statusProbe = probe;
     probe.finally(() => { if (statusProbe === probe) statusProbe = null; });
@@ -575,7 +578,7 @@ async function ensureWorkspaceBound(msg, force = false) {
   finally { if (bindingRequests.get(key)?.task === task) bindingRequests.delete(key); }
 }
 async function waitWorkspaceCapability() {
-  if (!connected) await waitForConnection(8000);
+  if (!connected) await waitForConnection(30000);
   const start = Date.now();
   while (connected && workspaceBinding === null && Date.now() - start < 4000)
     await new Promise(resolve => setTimeout(resolve, 100));
@@ -602,6 +605,25 @@ if (chrome.tabs && chrome.tabs.onRemoved) chrome.tabs.onRemoved.addListener(tabI
   if (session) releaseUnusedWorkspace(session).catch(() => {});
 });
 const cancellationKey = msg => msg.session + ":" + msg.call_id;
+// Query the original receipt, never replay a potentially mutating command.
+async function recoverLocalCall(msg, allowed = () => true, budget = 420000) {
+  if (!validCredential(msg.session) || typeof msg.call_id !== "string") return {ok:false,kind:"outcome_unknown",error:"Missing recovery receipt"};
+  const until = Date.now() + budget;
+  while (allowed() && Date.now() < until) {
+    if (!connected) await waitForConnection(Math.min(10000, Math.max(1, until - Date.now())));
+    if (!allowed()) break;
+    if (connected) {
+      const capability = await waitWorkspaceCapability();
+      if (capability && !callRecovery) return {ok:false,kind:"outcome_unknown",error:"Bridge has no receipt recovery; verify changes"};
+      if (capability && callRecovery) {
+        const result = await send({type:"recover_tool",session:msg.session,call_id:msg.call_id},5000,allowed);
+        if (!["disconnected","timeout","recovering"].includes(result.kind)) return result;
+      }
+    }
+    await new Promise(resolve=>setTimeout(resolve, 800));
+  }
+  return {ok:false,kind:allowed()?"outcome_unknown":"cancelled",error:"Original tool result unavailable; verify changes before retrying"};
+}
 function pruneCancelledCalls() {
   const cutoff = Date.now() - 600000;
   for (const [key, at] of cancelledCalls) if (at < cutoff) cancelledCalls.delete(key);
@@ -686,12 +708,15 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         }
         sendResponse({ok:true}); break;
       }
+      case "recover_tool": {
+        sendResponse(await recoverLocalCall(msg,()=>!cancelledCalls.has(cancellationKey(msg)))); break;
+      }
       case "call_tool": {
         pruneCancelledCalls();
         const wasCancelled = () => msg.call_id && cancelledCalls.has(cancellationKey(msg));
         const cancelled = () => sendResponse({ok:false,kind:"cancelled",sent:false,error:"Cancelled before dispatch"});
         if (wasCancelled()) { cancelled(); break; }
-        const timeout = (msg.timeout || 120000) + 10000;
+        const timeout = (msg.timeout || 120000) + (msg.server === "local" ? 110000 : 10000);
         const localWorkspace = msg.server === "local";
         const payload = {type:"call_tool", name:msg.name, arguments:msg.arguments, timeout:msg.timeout, server:msg.server, turn:msg.turn};
         if (localWorkspace) {
@@ -708,12 +733,25 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           }
         }
         if (wasCancelled()) { cancelled(); break; }
+        const recoverable = localWorkspace && callRecovery && !!payload.call_id;
         let result = await send(payload,timeout,() => !wasCancelled());
+        if (recoverable && ["disconnected","timeout"].includes(result.kind) && result.sent !== false && !wasCancelled()) {
+          result = await recoverLocalCall(msg,()=>!wasCancelled());
+        }
         // An explicit unbound error is emitted before execution, so recovery may retry safely.
         if (payload.session && result.kind === "workspace_unbound") {
           const bound = await ensureWorkspaceBound(msg,true);
           if (wasCancelled()) { cancelled(); break; }
-          if (bound.ok) result = await send(payload,timeout,() => !wasCancelled());
+          if (bound.ok) {
+            const recoverableRetry = callRecovery && !!payload.call_id;
+            // An unbound result is cached under the first receipt. Use a new
+            // receipt only after explicit pre-execution rejection; otherwise
+            // the caller must not repeat the command.
+            if (recoverableRetry) {
+              sendResponse({ok:false,kind:"workspace_unbound",sent:false,error:"Workspace reapproved; command not executed. Retry the command."}); break;
+            }
+            result = await send(payload,timeout,() => !wasCancelled());
+          }
           else result = {...bound,sent:false};
         }
         sendResponse(result); break;
