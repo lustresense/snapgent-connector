@@ -111,6 +111,29 @@ async fn authenticated_wire_contract() {
     .unwrap();
     assert_eq!(refused["ok"], false);
     assert_eq!(refused["kind"], "unknown_tool");
+    let sid = "45".repeat(32);
+    state.manager.bind_session(&sid, "local", snapgent_workspace::Workspace::bound(snapgent_workspace::Editor::Local, &root).unwrap()).await.unwrap();
+    ws.send(Message::Text(json!({"type":"call_tool","id":125,"name":"run_command","server":"local","session":sid,"call_id":"cancel-test","arguments":{"command":"this-must-not-run"}}).to_string().into())).await.unwrap();
+    let approval = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(approval) = state.approvals.take() { break approval; }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.unwrap();
+    ws.send(Message::Text(json!({"type":"cancel_tool","id":126,"session":sid,"call_id":"cancel-test"}).to_string().into())).await.unwrap();
+    let cancelled = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let message = ws.next().await.unwrap().unwrap();
+            if let Ok(text) = message.to_text() {
+                let result: Value = serde_json::from_str(text).unwrap();
+                if result["id"] == 125 { break result; }
+            }
+        }
+    }).await.unwrap();
+    assert_eq!(cancelled["kind"], "cancelled");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !approval.expired() { tokio::time::sleep(Duration::from_millis(20)).await; }
+    }).await.unwrap();
     // Stop while the extension is still connected. The UI shutdown must close
     // the active connection, not only the listening port.
     state.request_stop();

@@ -442,7 +442,10 @@ const ZSProvider = (() => {
       ed.dispatchEvent(new KeyboardEvent("keyup", o));
       return true;
     } finally {
-      if (relock && _locked) { const e2 = getEditor(); if (e2) e2.setAttribute("contenteditable", "false"); _injecting = false; }
+      if (relock) {
+        if (_locked) { const e2 = getEditor(); if (e2) e2.setAttribute("contenteditable", "false"); }
+        _injecting = false;
+      }
     }
   }
 

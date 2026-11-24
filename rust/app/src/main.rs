@@ -22,7 +22,7 @@ enum Page {
 
 struct Desktop {
     settings: Option<Settings>,
-    runtime: tokio::runtime::Runtime,
+    runtime: Option<tokio::runtime::Runtime>,
     state: Option<Arc<State>>,
     running: Arc<Mutex<String>>,
     snapshot: Arc<Mutex<Value>>,
@@ -53,11 +53,11 @@ impl Desktop {
         };
         let mut desktop = Self {
             settings,
-            runtime: tokio::runtime::Builder::new_multi_thread()
+            runtime: Some(tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
                 .enable_all()
                 .build()
-                .expect("Tokio runtime"),
+                .expect("Tokio runtime")),
             state: None,
             running: Arc::new(Mutex::new("Stopped".into())),
             snapshot: Arc::new(Mutex::new(json!({}))),
@@ -118,7 +118,7 @@ impl Desktop {
         let snapshot = self.snapshot.clone();
         let worker_state = state.clone();
         let repaint = ctx.clone();
-        self.worker = Some(self.runtime.spawn(async move {
+        self.worker = Some(self.runtime.as_ref().expect("runtime").spawn(async move {
             let observer = tokio::spawn(async move {
                 loop {
                     let snap = worker_state.manager.snapshot().await;
@@ -669,12 +669,15 @@ impl eframe::App for Desktop {
 impl Drop for Desktop {
     fn drop(&mut self) {
         self.stop();
-        if let Some(mut worker) = self.worker.take() {
-            if self.runtime.block_on(async {
-                tokio::time::timeout(Duration::from_secs(5), &mut worker).await
-            }).is_err() {
-                worker.abort();
+        if let Some(runtime) = self.runtime.take() {
+            if let Some(mut worker) = self.worker.take() {
+                if runtime.block_on(async {
+                    tokio::time::timeout(Duration::from_secs(5), &mut worker).await
+                }).is_err() {
+                    worker.abort();
+                }
             }
+            runtime.shutdown_timeout(Duration::from_secs(2));
         }
     }
 }

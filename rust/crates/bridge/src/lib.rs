@@ -43,8 +43,8 @@ impl State {
         let _ = self.catalog.send(value);
     }
     pub fn request_stop(&self) {
-        self.approvals.deny_all();
         self.shutdown.send_replace(true);
+        self.approvals.deny_all();
     }
     pub async fn run(self: Arc<Self>, port: u16, stream_port: u16) -> Result<()> {
         let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))

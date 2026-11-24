@@ -12,6 +12,17 @@ pub struct Session {
 fn error(id: &Value, kind: &str, message: impl ToString) -> Value {
     json!({"type":"tool_result","id":id,"ok":false,"kind":kind,"error":message.to_string()})
 }
+fn same_selected_path(a: &std::path::Path, b: &std::path::Path) -> bool {
+    if a == b { return true; }
+    #[cfg(windows)]
+    {
+        let a = a.to_string_lossy();
+        let b = b.to_string_lossy();
+        return a.trim_start_matches("\\\\?\\").eq_ignore_ascii_case(b.trim_start_matches("\\\\?\\"));
+    }
+    #[cfg(not(windows))]
+    false
+}
 fn canonical(value: &Value) -> Value {
     match value {
         Value::Object(m) => {
@@ -195,6 +206,8 @@ pub async fn handle(state: Arc<State>, session: &mut Session, request: Value) ->
                 let existing = state.manager.binding_root(sid, server).await;
                 if !path.is_absolute() {
                     error(&id, "permission_denied", "Select an absolute local directory")
+                } else if existing.as_ref().is_some_and(|old| !same_selected_path(old, &path)) {
+                    error(&id, "permission_denied", "Session is bound to a different workspace")
                 } else if existing.is_none() && !state.approvals.ask(
                     "Bind agent to workspace",
                     json!({"server":server,"workspace":path.to_string_lossy()}),

@@ -2,7 +2,7 @@
 
 ## Recommended runtime
 
-Use the native Rust application launched by `start.bat`. Configure the trusted browser extension ID and pair locally. Keep privileged-operation approvals enabled. The desktop window owns the bridge lifecycle. Closing it stops the listeners and sessions; there is no background/headless server mode. Pairing is manual and does not launch a native messaging process. The legacy Python and Electron runtimes are outside the scope of this migration.
+Use the native Rust application launched by `start.bat`. Configure the trusted browser extension ID and pair locally. Keep privileged-operation approvals enabled. The desktop window owns the bridge lifecycle. Closing it requests cancellation, stops listeners and sessions, and bounds runtime shutdown; there is no background/headless server mode. Pairing is manual and does not launch a native messaging process. The legacy Python and Electron runtimes are outside the scope of this migration.
 
 ## Security controls
 

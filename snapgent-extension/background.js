@@ -354,7 +354,7 @@ function waitForConnection(timeout = 8000) {
 }
 
 // ── request/response over the socket ────────────────────────────────────
-async function send(obj, timeout = REQUEST_TIMEOUT_DEFAULT) {
+async function send(obj, timeout = REQUEST_TIMEOUT_DEFAULT, allowed = () => true) {
   // The MV3 service worker can be suspended; the first message after a wake-up
   // arrives before the socket has re-opened. Wait for it instead of failing -
   // otherwise Kimi wrongly hears "bridge offline". Probe types fail fast so the
@@ -365,6 +365,7 @@ async function send(obj, timeout = REQUEST_TIMEOUT_DEFAULT) {
     await waitForConnection(fast ? CONNECT_WAIT_MS : 8000);
   }
   return new Promise((resolve) => {
+    if (!allowed()) { resolve({ok:false,kind:"cancelled",sent:false,error:"Cancelled before dispatch"}); return; }
     if (!connected || !ws || ws.readyState !== WebSocket.OPEN) {
       resolve({ ok: false, kind: "disconnected", sent: false, error: "bridge not connected" });
       return;
@@ -583,6 +584,23 @@ async function waitWorkspaceCapability() {
 
 // Keep cancelled IDs while a call may still be awaiting a binding approval.
 const cancelledCalls = new Map();
+const tabWorkspaces = new Map();
+async function releaseUnusedWorkspace(session) {
+  if ([...tabWorkspaces.values()].includes(session)) return;
+  boundSessions.delete("local:" + session);
+  if (connected) await send({type:"workspace_release",session},5000);
+}
+function rememberTabWorkspace(sender, session) {
+  if (!sender || !sender.tab || !Number.isInteger(sender.tab.id) || !validCredential(session)) return;
+  const old = tabWorkspaces.get(sender.tab.id);
+  tabWorkspaces.set(sender.tab.id, session);
+  if (old && old !== session) releaseUnusedWorkspace(old).catch(() => {});
+}
+if (chrome.tabs && chrome.tabs.onRemoved) chrome.tabs.onRemoved.addListener(tabId => {
+  const session = tabWorkspaces.get(tabId);
+  tabWorkspaces.delete(tabId);
+  if (session) releaseUnusedWorkspace(session).catch(() => {});
+});
 const cancellationKey = msg => msg.session + ":" + msg.call_id;
 function pruneCancelledCalls() {
   const cutoff = Date.now() - 600000;
@@ -642,12 +660,21 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       }
       case "workspace_list":
         sendResponse(await send({type:"workspace_list",server:msg.server},10000)); break;
-      case "workspace_select":
-        sendResponse(await ensureWorkspaceBound(msg)); break;
+      case "workspace_probe":
+        if (msg.server !== "local" || !validCredential(msg.session) || !connected) {
+          sendResponse({ok:false,kind:"workspace_unbound"}); break;
+        }
+        sendResponse(await send({type:"workspace_probe",server:"local",session:msg.session},5000)); break;
+      case "workspace_select": {
+        const bound = await ensureWorkspaceBound(msg);
+        if (bound.ok) rememberTabWorkspace(_sender, msg.session);
+        sendResponse(bound); break;
+      }
       case "workspace_release": {
         if (validCredential(msg.session)) {
-          boundSessions.delete(msg.server + ":" + msg.session);
-          await send({type:"workspace_release",session:msg.session},5000);
+          if (_sender && _sender.tab && tabWorkspaces.get(_sender.tab.id) === msg.session)
+            tabWorkspaces.delete(_sender.tab.id);
+          await releaseUnusedWorkspace(msg.session);
         }
         sendResponse({ok:true}); break;
       }
@@ -675,17 +702,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             const bound = await ensureWorkspaceBound(msg);
             if (wasCancelled()) { cancelled(); break; }
             if (!bound.ok) { sendResponse({...bound,sent:false}); break; }
+            rememberTabWorkspace(_sender, msg.session);
             payload.session = msg.session;
             payload.call_id = msg.call_id;
           }
         }
         if (wasCancelled()) { cancelled(); break; }
-        let result = await send(payload,timeout);
+        let result = await send(payload,timeout,() => !wasCancelled());
         // An explicit unbound error is emitted before execution, so recovery may retry safely.
         if (payload.session && result.kind === "workspace_unbound") {
           const bound = await ensureWorkspaceBound(msg,true);
           if (wasCancelled()) { cancelled(); break; }
-          if (bound.ok) result = await send(payload,timeout);
+          if (bound.ok) result = await send(payload,timeout,() => !wasCancelled());
           else result = {...bound,sent:false};
         }
         sendResponse(result); break;

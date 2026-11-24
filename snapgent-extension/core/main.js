@@ -469,6 +469,7 @@
         // reconstruct that message until its fate is known.
         if (possibleSubmission && !P.editorText().trim()) {
           if (await waitLanded(20000)) { messageSent = true; break; }
+          if (!stillCurrent()) break;
           if (!P.editorText().trim()) throw new Error("Submission status uncertain; stopped to prevent duplicate messages.");
         }
         diag("submit.typeAndSend", { hasImages: !!(images && images.length) });
@@ -515,6 +516,7 @@
           // An empty composer after a send is ambiguous: do not blindly resend.
           if (!P.editorText().trim()) {
             if (await waitLanded(20000)) { messageSent = true; break; }
+            if (!stillCurrent()) break;
             if (!P.editorText().trim()) throw new Error("Submission status uncertain; stopped to prevent duplicate messages.");
           }
           await sleep(Math.min(8000, 500 * Math.pow(2, tries - 1)));
@@ -3634,6 +3636,7 @@
     let cover, coverRaf, barRaf;
     let openMenuFn = null; // set by build(); lets the popup force the panel open via runtime message
     let bridgeOk = false, workspaceReady = false, workspaceProbePending = false, workspaceProbeAt = 0;
+    let workspaceProbeKey = "";
     let workspaceProbeFails = 0;
     let studioDown = false, placeDown = false, appDown = false, addonOk = false, studioProcUp = false;
     let wasConnected = false, bridgeBannerEl = null;
@@ -3934,7 +3937,7 @@
           pop.addEventListener("keydown", e=>{ if(e.key==="Escape") { e.preventDefault(); resolve(null); } else if(e.key==="Enter" && !e.isComposing && input.value.trim()) { e.preventDefault(); resolve(input.value.trim()); } e.stopPropagation(); });
         });
         if (!chosen || key !== workspaceKey() || A.running || A.starting || A.injecting) return;
-        if (current && current.workspace === chosen) { toast("Workspace already selected."); return; }
+        if (current && current.workspace === chosen && workspaceReady) { toast("Workspace already selected."); return; }
         status.textContent = "Approve this workspace in the native Snapgent app.";
         pop.querySelectorAll("button, input, select").forEach(e=>e.disabled=true);
         const next = {key,server,workspace:chosen,session:newWorkspaceSession()};
@@ -4348,7 +4351,8 @@
     //  • existing chat    → "No agent in this chat" (informs only, no action)
     function renderBar() {
       if (!bar) return;
-      if (isWorkspaceTarget() && A.bridge.workspaceBinding) workspaceReady = !!(workspaceChoice && workspaceChoice.key === workspaceKey());
+      const workspaceSelected = !!(workspaceChoice && workspaceChoice.key === workspaceKey());
+      if (!workspaceSelected) workspaceReady = false;
       setTarget(selectedTargetId);
       // indicator = an optional leading spinner; msg = the wrappable text.
       let toneClass = "standby", indicator = "", msg = "", label = "", kind = "", disabled = false, warn = false;
@@ -4384,6 +4388,9 @@
         } else if (!bridgeOk) {
           toneClass = "warn"; warn = true;
           msg = `<b>Active</b> · ${targetNameHtml()} offline`;
+        } else if (isWorkspaceTarget() && !workspaceReady) {
+          toneClass = "warn"; warn = true;
+          msg = `<b>Active</b> · workspace approval needed`;
         } else {
           toneClass = "active";
           msg = `<b>Active</b>${tools ? ` · ${tools} tools` : ""} · ${targetNameHtml()}`;
@@ -4455,7 +4462,7 @@
             !!A.bridge.connected && !!selectedServer && !!selectedServer.alive &&
             !(selectedServer.tools > 0);
           if (selectedTargetId !== "roblox" &&
-              (!bridgeOk || (isWorkspaceTarget() && !workspaceReady))) {
+              (!bridgeOk || (isWorkspaceTarget() && !workspaceSelected))) {
             toneClass = "warn"; warn = true;
             msg = !A.bridge.connected
               ? `Run <b>start.bat</b>`
@@ -4465,9 +4472,9 @@
                   : `Choose a <b>workspace folder</b>`
                 : `<b>${targetNameHtml()} unavailable</b>`;
             label = `▶︎ Start`; kind = "start"; disabled = true;
-          } else if (bridgeOk && (!isWorkspaceTarget() || workspaceReady)) {
+          } else if (bridgeOk && (!isWorkspaceTarget() || workspaceSelected)) {
             toneClass = "standby";
-            msg = `Ready.`;
+            msg = isWorkspaceTarget() && !workspaceReady ? `Approve workspace on Start.` : `Ready.`;
             label = `▶︎ Start`; kind = "start";
           } else if (addonOk) {
             // Roblox is down but another MCP server is live: allow a DEGRADED start
@@ -4580,46 +4587,30 @@
           setupSeen = true;
           try { chrome.storage.local.set({ zsSetupSeen: true }); } catch {}
         }
-        // Workspace probe throttle. A 5 s floor was too tight: renderBar() is
-        // re-entrant (status timer + DOM mutations + this block's own finally()),
-        // so the probe could fire twice in a row and reach ~24 list_dir/min -
-        // measured 29,280 probe calls in one day, which starved real tool calls
-        // and made the bridge look unreachable. The success floor is 120 s: a live
-        // probe log showed 788 list_dir results (592 of them this exact probe) in
-        // six hours, i.e. one probe every 30 s, all of them saying the same thing.
-        // Backoff grows after a failure and success resets it to the floor.
-        if (serverConnected && !workspaceReady && !workspaceProbePending && !workspaceProbeFails) workspaceProbeAt = 0;
-        const probeFloor = workspaceReady === false && workspaceProbeFails > 0
-          ? Math.min(5000 * Math.pow(2, Math.min(workspaceProbeFails, 5)), 300000)
-          : 120000;
-        if (isWorkspaceTarget() && serverConnected && !workspaceProbePending &&
-            Date.now() - workspaceProbeAt >= probeFloor) {
+        // Check only an existing binding, never ask for approval or list files
+        // from a status poll. A saved selection is not proof of a live binding.
+        const currentKey = workspaceKey();
+        if (workspaceProbeKey !== currentKey) {
+          workspaceProbeKey = currentKey;
+          workspaceProbeAt = 0;
+          workspaceReady = false;
+          workspaceProbeFails = 0;
+        }
+        const probeFloor = workspaceReady ? 120000 :
+          Math.min(5000 * Math.pow(2, Math.min(workspaceProbeFails, 5)), 300000);
+        if (isWorkspaceTarget() && serverConnected && s.workspaceBinding &&
+            !workspaceProbePending && Date.now() - workspaceProbeAt >= probeFloor) {
           workspaceProbeAt = Date.now();
           workspaceProbePending = true;
-          ensureTools(false).then(() => {
-            const workspaceTool = activeTools().find((tool) => bareToolName(tool.name) === "list_dir");
-            bridgeOk = serverConnected &&
-              ((selected.tools || 0) > 0 || activeTools().length > 0);
-            if (!workspaceTool) {
-              workspaceReady = false;
-              workspaceProbeFails += 1;
-              return;
-            }
-            const probe = s.workspaceBinding ? loadWorkspaceChoice().then(choice => ({ok:!!choice})) : Promise.resolve({ok:false});
-            return probe.then((result) => {
-              workspaceReady = !!(result && result.ok);
-              workspaceProbeFails = workspaceReady ? 0 : workspaceProbeFails + 1;
-            });
-          }).catch((error) => {
-            workspaceReady = false;
-            workspaceProbeFails += 1;
-            console.warn("[snapgentV3] Could not verify local workspace:", error);
-          }).finally(() => {
-            workspaceProbePending = false;
-            // Do NOT call renderBar() here: this block runs *inside* renderBar(),
-            // so it would recurse and re-arm the probe immediately - one of the
-            // causes of the list_dir probe storm.
-          });
+          loadWorkspaceChoice().then(async choice => {
+            const result = choice ? await bg({type:"workspace_probe",server:"local",session:choice.session}) : null;
+            if (workspaceKey() !== currentKey || !A.bridge.connected ||
+                (choice && workspaceChoice && workspaceChoice.session !== choice.session)) return;
+            workspaceReady = !!(result && result.ok);
+            workspaceProbeFails = workspaceReady ? 0 : workspaceProbeFails + 1;
+          }).catch(() => {
+            if (workspaceKey() === currentKey) { workspaceReady = false; workspaceProbeFails += 1; }
+          }).finally(() => { workspaceProbePending = false; });
         } else if (isWorkspaceTarget() && !serverConnected) {
           workspaceReady = false;
           workspaceProbeAt = 0;

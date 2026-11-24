@@ -13,7 +13,7 @@ No running code editor is required. Choose an absolute local folder before start
 - Native Rust bridge with explicit workspace selection.
 - Filesystem, search, editing, terminal and Git tools.
 - Shared automatic submission retry policy across 13 AI providers.
-- Session isolation, steering and optional MCP integrations.
+- Session isolation, steering, cancellable local commands and optional MCP integrations.
 - Local authentication and privileged-operation approval dialogs.
 
 ## Installation (Windows)

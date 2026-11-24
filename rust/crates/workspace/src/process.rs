@@ -21,11 +21,25 @@ fn terminate(child: &mut Child) {
     #[cfg(windows)]
     {
         let pid = child.id().to_string();
-        let _ = hidden_command("taskkill.exe").args(["/PID", &pid, "/T", "/F"])
-            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+        if let Some(windir) = std::env::var_os("SystemRoot") {
+            let exe = std::path::PathBuf::from(windir).join("System32/taskkill.exe");
+            if let Some(exe) = exe.to_str() {
+                if let Ok(mut killer) = hidden_command(exe).args(["/PID", &pid, "/T", "/F"])
+                    .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+                    let at = Instant::now();
+                    while matches!(killer.try_wait(), Ok(None)) && at.elapsed() < Duration::from_secs(2) {
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    if matches!(killer.try_wait(), Ok(None)) { let _ = killer.kill(); }
+                }
+            }
+        }
     }
     let _ = child.kill();
-    let _ = child.wait();
+    let at = Instant::now();
+    while matches!(child.try_wait(), Ok(None)) && at.elapsed() < Duration::from_secs(1) {
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 pub fn run(root: &Path, command: &[String], timeout: u64, cancelled: &AtomicBool) -> Result<String> {
     if cancelled.load(Ordering::Acquire) { bail!("Command cancelled before execution"); }

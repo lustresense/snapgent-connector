@@ -617,13 +617,14 @@ const ZSProvider = (() => {
       userCount() > usersBeforeSend ||
       !!stopButton();
 
-    let clickSucceeded = false;
+    let clickSucceeded = false, attempted = false;
     const b = sendButton();
 
     // Primary submission path: click the send button once
     if (b && canSend()) {
       if (typeof b.focus === "function") b.focus();
       try {
+        attempted = true;
         b.click();
         clickSucceeded = true;
       } catch {}
@@ -635,6 +636,7 @@ const ZSProvider = (() => {
       if (edTarget) {
         if (typeof edTarget.focus === "function") edTarget.focus();
         try {
+          attempted = true;
           edTarget.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true }));
           edTarget.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true }));
         } catch {}
@@ -649,7 +651,7 @@ const ZSProvider = (() => {
       newUserTurn: userCount() > usersBeforeSend,
       generating: !!stopButton(),
     });
-    return clickSucceeded || sent || canSend();
+    return attempted;
   }
 
   function stopGeneration() {
