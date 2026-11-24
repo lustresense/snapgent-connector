@@ -581,7 +581,8 @@ const ZSProvider = (() => {
     el.dispatchEvent(new Event("input", { bubbles: true }));
   }
 
-  async function typeAndSend(text, images) {
+  async function typeAndSend(text, images, canSend = () => true, attempt = 0) {
+    if (!canSend()) return false;
     // Images FIRST: staging swaps in the inline image; the mirror textarea still
     // drives the composed text alongside it. Idempotent across the core's up-to-4
     // retries via the _attachedImages identity guard.
@@ -593,6 +594,7 @@ const ZSProvider = (() => {
         diag("meta.tas.attached", { ok, imgId: images.__zsId });
       } catch (e) { diag("meta.tas.attachErr", { msg: String((e && e.message) || e) }); }
     }
+    if (!canSend()) return false;
     const visEd = visibleEditor();
     const controlled = writeEl();
     const targetEditor = visEd || controlled;
@@ -607,8 +609,8 @@ const ZSProvider = (() => {
       const b = sendButton();
       return !!b && !b.disabled && b.getAttribute("aria-disabled") !== "true";
     };
-    const ready = await waitFor(sendReady, 30000);
-    if (!ready) throw new Error("Meta AI send button did not become available.");
+    const ready = await waitFor(() => !canSend() || sendReady(), 30000);
+    if (!canSend() || !ready || !sendReady() || !editorText().trim()) return false;
 
     const isSubmitted = () =>
       (editorText().trim() === "" && !hasPendingAttachment()) ||
@@ -619,7 +621,7 @@ const ZSProvider = (() => {
     const b = sendButton();
 
     // Primary submission path: click the send button once
-    if (b) {
+    if (b && canSend()) {
       if (typeof b.focus === "function") b.focus();
       try {
         b.click();
@@ -628,7 +630,7 @@ const ZSProvider = (() => {
     }
 
     // Fallback path: only if clicking the send button is known to have failed (e.g. absent or threw)
-    if (!clickSucceeded) {
+    if (!clickSucceeded && canSend()) {
       const edTarget = visEd || targetEditor;
       if (edTarget) {
         if (typeof edTarget.focus === "function") edTarget.focus();
@@ -639,7 +641,7 @@ const ZSProvider = (() => {
       }
     }
 
-    const sent = await waitFor(isSubmitted, 10000);
+    const sent = await waitFor(() => !canSend() || isSubmitted(), 10000);
     if (sent) _attachedImages = null;
     diag("meta.tas.sent", {
       sent,
@@ -647,13 +649,7 @@ const ZSProvider = (() => {
       newUserTurn: userCount() > usersBeforeSend,
       generating: !!stopButton(),
     });
-    if (!sent) {
-      const send = sendButton();
-      throw new Error(
-        `Meta AI did not confirm the message was sent (composer text: ${editorText().length} chars, ` +
-        `send button: ${!!send}, stop button: ${!!stopButton()}). Check the composer and try again.`
-      );
-    }
+    return clickSucceeded || sent || canSend();
   }
 
   function stopGeneration() {

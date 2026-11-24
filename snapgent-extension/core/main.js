@@ -395,6 +395,11 @@
   }
 
   async function submitAndGetBase(text, images) {
+    const sendEpoch = A.submitEpoch = (A.submitEpoch || 0) + 1;
+    const sendConversation = P.conversationKey();
+    const sendBootstrap = A.startGen;
+    const stillCurrent = () => !A.stop && A.submitEpoch === sendEpoch && A.startGen === sendBootstrap &&
+      (!sendConversation || P.conversationKey() === sendConversation);
     const steering = A.running && !A.stop ? steeringQueue.slice() : [];
     if (steering.length) text += steeringText(steering);
     captureSendToken();
@@ -429,6 +434,7 @@
       const previousKeys = new Set(previousUsers.map(it => P.itemKey ? P.itemKey(it) : it).filter(k => k != null));
       const signature = String(text).replace(/\s+/g, "").slice(0, 160);
       const landed = () => {
+        if (!stillCurrent()) return false;
         if (P.userCount() > preUser || P.assistantCount() > base) return true;
         if (!signature) return false;
         return P.allItems().filter(P.isUserItem).slice(-3).some(it => {
@@ -441,27 +447,35 @@
       // CRITICAL: never type/send while the tab is HIDDEN. Background tabs throttle
       // rendering, which made the landed-check unreliable and caused the SAME
       // feedback to be sent several times. Send ONLY while visible.
+      await backgroundSessionsReady();
+      const canSend = () => stillCurrent() && !landed() && (!document.hidden || backgroundSessions);
+      const waitLanded = async ms => {
+        await waitFor(() => landed() || !stillCurrent(), ms);
+        return landed();
+      };
       let tries = 0;
       let messageSent = false;
       const maxTries = 8;
       let possibleSubmission = false;
-      while (!messageSent && !landed() && tries < maxTries && !A.stop) {
+      while (!messageSent && !landed() && tries < maxTries && stillCurrent()) {
         if (document.hidden) {
           diag("send.waitVisible", { tries });
-          if (!(await waitVisible()) || A.stop) break; // park (no cap) until foreground; break only on user stop
+          if (!(await waitVisible()) || !stillCurrent()) break;
         }
         await jitterBeforeSend();
+        if (!stillCurrent() || landed()) break;
+        if (!canSend()) continue;
         // A delayed acceptance can clear the draft during backoff. Never
         // reconstruct that message until its fate is known.
         if (possibleSubmission && !P.editorText().trim()) {
-          if (await waitFor(landed, 20000)) { messageSent = true; break; }
+          if (await waitLanded(20000)) { messageSent = true; break; }
           if (!P.editorText().trim()) throw new Error("Submission status uncertain; stopped to prevent duplicate messages.");
         }
         diag("submit.typeAndSend", { hasImages: !!(images && images.length) });
         let typed;
         try {
-          if (landed() || A.stop) break;
-          typed = await P.typeAndSend(text, images);
+          if (!canSend()) continue;
+          typed = await P.typeAndSend(text, images, canSend, tries);
         } catch (e) {
           diag("send.transientError", { tries, error: String(e.message || e) });
         }
@@ -473,15 +487,16 @@
         // the false positive that stranded Start on "Starting…" for minutes
         // with zero turns. Retry the send instead of believing it went out.
         if (landed()) { messageSent = true; break; }
+        if (!stillCurrent()) break;
         // false is reserved for a provider that did not attempt submission.
         // Undefined (legacy adapters) or exceptions may occur after a click.
         possibleSubmission = possibleSubmission || typed !== false;
         if (typed === false && !possibleSubmission) {
-          if (await waitFor(landed, 2000)) { messageSent = true; break; }
+          if (await waitLanded(2000)) { messageSent = true; break; }
           diag("send.retry", { tries });
           tries++;
           await sleep(Math.min(8000, 500 * Math.pow(2, tries - 1)));
-          if (A.stop) break;
+          if (!stillCurrent()) break;
           continue;
         }
         // Re-arm the pre-hide window NOW that typeAndSend has returned (the send
@@ -494,15 +509,12 @@
         // into the window, and the pre-hide is one-shot (consumes the first turn).
         A.injectHideUntil = Date.now() + 2500;
         // Wait for a transcript turn; a cleared draft is not confirmation.
-        await waitFor(() => {
-          if (landed()) messageSent = true;
-          return messageSent;
-        }, 8000);
+        messageSent = await waitLanded(8000);
         tries++;
-        if (!messageSent && !landed() && !A.stop) {
+        if (!messageSent && !landed() && stillCurrent()) {
           // An empty composer after a send is ambiguous: do not blindly resend.
           if (!P.editorText().trim()) {
-            if (await waitFor(landed, 20000)) { messageSent = true; break; }
+            if (await waitLanded(20000)) { messageSent = true; break; }
             if (!P.editorText().trim()) throw new Error("Submission status uncertain; stopped to prevent duplicate messages.");
           }
           await sleep(Math.min(8000, 500 * Math.pow(2, tries - 1)));
@@ -516,7 +528,7 @@
       // - the reported "the tool result just never gets injected" symptom. Tell
       // the user what actually happened so they can nudge the conversation
       // themselves instead of watching a stuck bar.
-      if (!messageSent && !landed() && !A.stop) {
+      if (!messageSent && !landed() && stillCurrent()) {
         diag("send.failed", { tries });
         throw new Error("Automatic submission failed after " + tries + " attempts. Check the provider connection or send the pending composer message manually.");
       }
@@ -526,7 +538,7 @@
       // for the whole phase, so don't lift it here between an injection and the
       // next waitForResponse - it stays up until the loop / bootstrap ends.
       if (!A.starting && !A.running) ui.inputCover(false);
-      setTimeout(() => (A.injecting = false), 400);
+      setTimeout(() => { if (A.submitEpoch === sendEpoch) A.injecting = false; }, 400);
       // Camouflage the turn we just injected without waiting on the rAF observer
       // (paused in a background tab). A couple of nudges cover the render.
       setTimeout(scheduleSweep, 200);
@@ -1408,7 +1420,7 @@
       });
       try {
         const result = await Promise.race([
-          bg({type:"call_tool",name,arguments:args,timeout,server:selectedTargetId,turn:turnKeyForCache,call_id:callId,...workspaceFields}),
+          bg({type:"call_tool",name,arguments:args,timeout,server: selectedTargetId, turn: turnKeyForCache, call_id: callId,...workspaceFields}),
           hardCap, stopWatch
         ]);
         if (boundWorkspace && result && ["stopped","timeout"].includes(result.kind)) {
@@ -2666,7 +2678,7 @@
       }
       if (isWorkspaceTarget() && A.bridge.workspaceBinding) {
         const choice = await loadWorkspaceChoice();
-        if (!choice) { ui.banner("warn","Choose workspace","Select a local folder using Workspace, then Start."); return; }
+        if (!choice) { ui.banner("warn","Choose workspace","Choose a local folder from the target selector, then Start."); return; }
         const probe = await bg({type:"workspace_select",...choice});
         if (!alive()) return;
         if (!probe.ok) { ui.banner("warn","Workspace unavailable",probe.error || "Approve the selected workspace in the native bridge."); return; }

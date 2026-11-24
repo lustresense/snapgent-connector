@@ -472,11 +472,14 @@ const ZSProvider = (() => {
     }
   }
 
-  async function typeAndSend(text, images) {
+  async function typeAndSend(text, images, canSend = () => true, attempt = 0) {
+    if (!canSend()) return false;
     const editor = getEditor();
     if (!editor) throw new Error("Arena input box not found");
     editor.focus();
-    setEditorText(editor, truncateForSend(text));
+    text = truncateForSend(text);
+    if (editorText() !== text) setEditorText(editor, text);
+    if (!canSend() || !editorText().trim()) return false;
     if (images && images.length) tagImages(images);
     diag("arena.tas.enter", {
       textLen: (text || "").length,
@@ -499,8 +502,9 @@ const ZSProvider = (() => {
       const b = sendButton();
       return !!b && !b.disabled && b.getAttribute("aria-disabled") !== "true";
     };
-    const ready1 = await waitFor(sendReady, 60000);
+    const ready1 = await waitFor(() => !canSend() || sendReady(), 30000);
     diag("arena.tas.ready", { ready: ready1 });
+    if (!canSend() || !sendReady()) return false;
     // Attach LAST, right before the send - see gemini.js for why. Guard against
     // the core's up-to-4 typeAndSend retries (same `images` array ref): skip when
     // this exact set was already staged (identity match), and drop any stale
@@ -513,25 +517,15 @@ const ZSProvider = (() => {
         diag("arena.tas.attached", { imgId: images.__zsId, ok, pendingAfter: pendingCount() });
       } catch (e) { diag("arena.tas.attachErr", { msg: String(e && e.message || e) }); }
       // Staging the file re-disables send for ~0.4s while Arena ingests it.
-      await waitFor(sendReady, 6000);
+      await waitFor(() => !canSend() || sendReady(), 25000);
     } else {
       diag("arena.tas.skipAttach", { reason: !images || !images.length ? "no-images" : "same-set", imgId: images ? images.__zsId : null });
     }
-    // Click and CONFIRM the send took (editor clears the instant Arena accepts
-    // it, image AND text paths). Re-click until it clears so a single swallowed
-    // click can't strand the message/attachment. No re-attach here.
-    let sent = false;
-    for (let i = 0; i < 6 && !sent; i++) {
-      if (sendReady()) {
-        try { sendButton().click(); } catch {}
-      } else if (!isHardGenerating()) {
-        const o = { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true };
-        editor.dispatchEvent(new KeyboardEvent("keydown", o));
-        editor.dispatchEvent(new KeyboardEvent("keyup", o));
-      }
-      sent = await waitFor(() => editorText().trim() === "", 700);
-    }
+    if (!canSend() || !sendReady() || !editorText().trim()) return false;
+    sendButton().click();
+    const sent = await waitFor(() => !canSend() || !editorText().trim() || isHardGenerating(), 5000);
     diag("arena.tas.sent", { sent, editorLen: editorText().length, pendingAfterSend: pendingCount() });
+    return true;
   }
 
   // Arena shows "Generating…" for a beat BEFORE the native "Stop generation"

@@ -630,7 +630,7 @@ ok("mobile textarea text can be read", P.editorText() === "");
   ok("successful send paths report true",
     /(?:btn\.click\(\);[\s\S]{0,60}return true|if \(btn\) \{ btn\.click\(\); return true; \})/.test(prov));
   ok("core retries the send when the provider could not type",
-    core.includes("typed = await P.typeAndSend(text, images);") &&
+    core.includes("typed = await P.typeAndSend(text, images, canSend, tries);") &&
     core.includes("if (typed === false && !possibleSubmission)") &&
     core.includes("possibleSubmission = possibleSubmission || typed !== false;"));
   ok("ambiguous delayed acceptance is guarded before another send",
@@ -737,7 +737,8 @@ ok("mobile textarea text can be read", P.editorText() === "");
     /remoteCommandListeners\.push\(setPolling\);/.test(main) &&
     /setPolling\(remoteCommands\);/.test(main));
   ok("every tool call states which turn it belongs to, so the bridge can dedupe it",
-    (main.match(/turn: turnKeyForCache/g) || []).length === 2 &&
+    (main.match(/turn: turnKeyForCache/g) || []).length === 1 &&
+    main.includes("const retry = await dispatchTool();") &&
     /const turnKeyForCache = typeof turn === "string" && turn \? turn : undefined;/.test(main) &&
     /runTool\(call, `\$\{P\.conversationKey\(\)\}\|\$\{turnKey\(res\.item\)\}`\)/.test(main));
   ok("the bridge still falls back to execCommand when the DOM parse lands empty",

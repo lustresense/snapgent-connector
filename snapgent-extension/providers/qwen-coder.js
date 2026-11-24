@@ -144,18 +144,23 @@ const ZSProvider = (() => {
     setter.call(editor, text);
     editor.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
   }
-  async function typeAndSend(text) {
+  async function typeAndSend(text, images, canSend = () => true, attempt = 0) {
+    if (!canSend()) return false;
     const editor = getEditor();
-    if (!editor) throw new Error("Qwen Coder input box not found");
+    if (!editor) return false;
     const beforeUsers = userCount();
-    setTextareaValue(editor, text);
-    const ready = await waitFor(() => !!sendButton(), 10000);
+    const sameDraft = () => editorText().replace(/\r?\n/g, "").trim() === text.replace(/\r?\n/g, "").trim();
+    if (!sameDraft()) setTextareaValue(editor, text);
+    const ready = () => {
+      const button = sendButton();
+      return !!button && !button.disabled && button.getAttribute("aria-disabled") !== "true";
+    };
+    await waitFor(() => !canSend() || ready(), 10000);
+    if (!canSend() || !ready() || !sameDraft() || !editorText().trim() || userCount() > beforeUsers) return false;
     const button = sendButton();
-    if (!ready || !button) throw new Error("Qwen Coder send button did not become available");
     button.click();
-    await waitFor(() =>
-      editorText().trim() === "" || userCount() > beforeUsers || isHardGenerating(),
-    5000);
+    await waitFor(() => !canSend() || editorText().trim() === "" || userCount() > beforeUsers || isHardGenerating(), 5000);
+    return true;
   }
   function stopGeneration() {
     const button = stopButton();

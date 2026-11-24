@@ -1191,7 +1191,8 @@ const ZSProvider = (() => {
   }
 
   const stagedSendImages = new WeakSet();
-  async function typeAndSend(text, images) {
+  async function typeAndSend(text, images, canSend = () => true, attempt = 0) {
+    if (!canSend()) return false;
     let ed = getEditor();
     if (!ed) throw new Error("ChatGPT input box not found");
     text = truncateForSend(text);
@@ -1256,6 +1257,7 @@ const ZSProvider = (() => {
       // accept input (contenteditable "true" + insertText enabled), retype on a
       // FRESH node, and prove the text landed by reading it back.
       for (let attempt = 0; attempt < 6 && !got; attempt++) {
+        if (!canSend()) return false;
         if (attempt) await sleep(150 * attempt);
         const ready = await waitEditorReady(attempt ? 1200 : 4000);
         if (!ready) {
@@ -1288,6 +1290,7 @@ const ZSProvider = (() => {
         return false;
       }
       // Attach once per logical feedback. A retry must not duplicate uploads.
+      if (!canSend()) return false;
       if (images && images.length && !stagedSendImages.has(images)) {
         stagedSendImages.add(images);
         await attachImages(images);
@@ -1298,13 +1301,15 @@ const ZSProvider = (() => {
         const b = sendButton();
         return !!b && !b.disabled && b.getAttribute("aria-disabled") !== "true";
       };
-      await waitFor(ready, images && images.length ? 25000 : 8000);
+      await waitFor(() => !canSend() || ready(), images && images.length ? 25000 : 8000);
+      if (!canSend()) return false;
       if (!sendButton() && !genActive()) await unwedgeStopPersistently();
+      if (!canSend()) return false;
       if (userCount() > beforeUsers || !editorText().trim()) return true;
       if (stopButton()) return false;
       ed = getEditor();
       if (!ed || !composerHolds(ed, text)) return false;
-      if (ready()) {
+      if (ready() && attempt % 2 === 0) {
         const btn = sendButton();
         btn.click();
         if (await waitFor(accepted, 6000)) return true;
@@ -1313,7 +1318,7 @@ const ZSProvider = (() => {
         return true;
       }
       // Never bypass a disabled send control (quota/upload/generation).
-      if (sendButton() || stopButton()) return false;
+      if (!canSend() || stopButton() || (sendButton() && !ready())) return false;
       ed.focus({ preventScroll: true });
       const o = { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true, composed: true };
       for (const kind of ["keydown", "keyup"]) {
@@ -1325,7 +1330,7 @@ const ZSProvider = (() => {
       diag("send.fallbackVerified", { sent: !!sent });
       return true;
     } finally {
-      if (relock) { ed = getEditor() || ed; setEditable(false); }
+      if (relock && _locked) { ed = getEditor() || ed; setEditable(false); }
     }
   }
 

@@ -336,11 +336,13 @@ const ZSProvider = (() => {
     return false;
   }
 
-  async function typeAndSend(text, images) {
+  async function typeAndSend(text, images, canSend = () => true, attempt = 0) {
+    if (!canSend()) return false;
     const editor = getEditor();
     if (!editor) throw new Error("GLM input box not found");
     editor.focus();
-    setTextareaValue(editor, text);
+    if (editorText() !== text) setTextareaValue(editor, text);
+    if (!canSend() || !editorText().trim()) return false;
     // Attach images LAST, right before the send click - see gemini.js's
     // typeAndSend for why (attaching before retyping the text can sever the
     // site's binding between the pending upload and the message being sent).
@@ -357,8 +359,9 @@ const ZSProvider = (() => {
     // cycle keeps getting nudged until it re-enables the button.
     let lastNudge = Date.now();
     const enabled = await waitFor(() => {
+      if (!canSend()) return true;
       const b = sendButton();
-      if (b && !b.disabled) return true;
+      if (b && !b.disabled && b.getAttribute("aria-disabled") !== "true") return true;
       if (Date.now() - lastNudge > 700) {
         lastNudge = Date.now();
         // Re-assert the value (a heavy re-render can drop it) and re-fire input.
@@ -368,11 +371,16 @@ const ZSProvider = (() => {
       return false;
     }, 8000);
     diag("glm.send", { enabled, busy: isBusyNow() });
-    if (!clickSendButton() && !isBusyNow()) {
+    if (!canSend() || !editorText().trim() || isHardGenerating()) return false;
+    const b = sendButton();
+    if (b && (b.disabled || b.getAttribute("aria-disabled") === "true")) return false;
+    if (b && attempt % 2 === 0) b.click();
+    else {
       const o = { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true };
       editor.dispatchEvent(new KeyboardEvent("keydown", o));
       editor.dispatchEvent(new KeyboardEvent("keyup", o));
     }
+    return true;
   }
 
   function stopGeneration() {

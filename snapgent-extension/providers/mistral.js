@@ -210,24 +210,23 @@ const ZSProvider = (() => {
     }
     if (lockedEditor === editor) editor.setAttribute("contenteditable", "false");
   }
-  async function typeAndSend(text) {
+  async function typeAndSend(text, images, canSend = () => true, attempt = 0) {
+    if (!canSend()) return false;
     const editor = getEditor();
-    if (!editor) throw new Error("Mistral input box not found");
+    if (!editor) return false;
     const beforeUsers = userCount();
-    writeText(editor, text);
-    const ready = await waitFor(() => {
+    const sameDraft = () => editorText().replace(/\r?\n/g, "").trim() === text.replace(/\r?\n/g, "").trim();
+    if (!sameDraft()) writeText(editor, text);
+    const ready = () => {
       const button = sendButton();
       return !!button && !button.disabled && button.getAttribute("aria-disabled") !== "true";
-    }, 10000);
+    };
+    await waitFor(() => !canSend() || ready(), 10000);
+    if (!canSend() || !ready() || !sameDraft() || !editorText().trim() || userCount() > beforeUsers) return false;
     const button = sendButton();
-    if (!ready || !button || button.disabled || button.getAttribute("aria-disabled") === "true") {
-      throw new Error("Mistral send button did not become available");
-    }
     button.click();
-    const sent = await waitFor(() =>
-      editorText().trim() === "" || userCount() > beforeUsers || isHardGenerating(),
-    5000);
-    if (!sent) throw new Error("Mistral did not confirm the message was sent");
+    await waitFor(() => !canSend() || editorText().trim() === "" || userCount() > beforeUsers || isHardGenerating(), 5000);
+    return true;
   }
   function stopGeneration() {
     const button = stopButton();

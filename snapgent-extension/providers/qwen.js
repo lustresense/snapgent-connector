@@ -642,7 +642,8 @@ const ZSProvider = (() => {
     return text.slice(0, headLen) + marker + text.slice(text.length - tailLen);
   }
 
-  async function typeAndSend(text, images) {
+  async function typeAndSend(text, images, canSend = () => true, attempt = 0) {
+    if (!canSend()) return false;
     const ed = getEditor();
     if (!ed) throw new Error("Qwen input box not found");
     text = truncateForSend(text);
@@ -661,16 +662,21 @@ const ZSProvider = (() => {
       // site's binding between the pending upload and the message being sent).
       // Guard: submitAndGetBase RETRIES typeAndSend up to 4x; only attach if
       // nothing is staged yet, else each retry pastes ANOTHER duplicate copy.
+      if (!canSend() || !editorText().trim()) return false;
       if (images && images.length && !hasPendingAttachment()) { try { await attachImages(images); } catch {} }
-      await waitFor(() => !!sendButton(), 2000);
+      await waitFor(() => !canSend() || !!sendButton(), 8000);
+      if (!canSend() || !editorText().trim() || isHardGenerating()) return false;
       const btn = sendButton();
-      if (btn) { btn.click(); return; }
+      if (btn && (btn.disabled || btn.getAttribute("aria-disabled") === "true")) return false;
+      if (btn && attempt % 2 === 0) { btn.click(); return true; }
+      if (!canSend()) return false;
       // Fallback: Enter key
       const o = { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true };
       ed.dispatchEvent(new KeyboardEvent("keydown", o));
       ed.dispatchEvent(new KeyboardEvent("keyup", o));
+      return true;
     } finally {
-      if (wasLocked) ed.setAttribute("readonly", "");
+      if (wasLocked && ed.hasAttribute("data-zs-locked")) ed.setAttribute("readonly", "");
     }
   }
 

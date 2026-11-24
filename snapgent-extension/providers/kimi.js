@@ -412,7 +412,8 @@ const ZSProvider = (() => {
     document.execCommand("insertText", false, text);
   }
 
-  async function typeAndSend(text, images) {
+  async function typeAndSend(text, images, canSend = () => true, attempt = 0) {
+    if (!canSend()) return false;
     const ed = getEditor();
     if (!ed) throw new Error("Kimi input box not found");
     const relock = _locked;
@@ -424,19 +425,24 @@ const ZSProvider = (() => {
       // site's binding between the pending upload and the message being sent).
       // submitAndGetBase RETRIES this function; only attach if nothing is pending
       // yet, else each retry uploads ANOTHER duplicate copy.
+      if (!canSend() || !editorText().trim()) return false;
       if (images && images.length && !hasPendingAttachment()) {
         try { await attachImages(images); } catch {}
       }
       // Wait for the send control to enable (proof Lexical registered the text).
-      await waitFor(() => !!sendButton(), 1500);
+      await waitFor(() => !canSend() || !!sendButton(), 8000);
+      if (!canSend() || !editorText().trim() || isHardGenerating()) return false;
       const btn = sendButton();
-      if (btn) { btn.click(); return; }
+      if (btn && (btn.disabled || btn.getAttribute("aria-disabled") === "true")) return false;
+      if (btn && attempt % 2 === 0) { btn.click(); return true; }
+      if (!canSend()) return false;
       // Fallback: Enter sends in Lexical's composer.
       const o = { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true };
       ed.dispatchEvent(new KeyboardEvent("keydown", o));
       ed.dispatchEvent(new KeyboardEvent("keyup", o));
+      return true;
     } finally {
-      if (relock) { const e2 = getEditor(); if (e2) e2.setAttribute("contenteditable", "false"); _injecting = false; }
+      if (relock && _locked) { const e2 = getEditor(); if (e2) e2.setAttribute("contenteditable", "false"); _injecting = false; }
     }
   }
 

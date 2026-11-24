@@ -406,7 +406,8 @@ const ZSProvider = (() => {
     if (lines.length > INSERT_CHUNK_LINES) diag("send.insertDone", { lines: lines.length, ms: Date.now() - t0 });
   }
 
-  async function typeAndSend(text, images) {
+  async function typeAndSend(text, images, canSend = () => true, attempt = 0) {
+    if (!canSend()) return false;
     const ed = getEditor();
     if (!ed) throw new Error("Gemini input box not found");
     // Cap BEFORE any comparison below, so the retry path's `editorText() !== text`
@@ -429,6 +430,7 @@ const ZSProvider = (() => {
         const box = composerFrame();
         return !!(box && box.querySelector("[class*='preview'], [class*='thumbnail']"));
       };
+      if (!canSend() || !editorText().trim()) return false;
       if (images && images.length && !hasPendingAttachment()) {
         diag("attach.beforeCall", { count: images.length });
         try { const ok = await attachImages(images); diag("attach.afterCall", { ok }); }
@@ -437,30 +439,35 @@ const ZSProvider = (() => {
       // A generation that just ended can leave the action button WEDGED on the
       // stop icon (see unwedgeStop), so arrow_upward never appears and the send
       // fails. If the stream is frozen yet a stop button shows, reset it first.
+      if (!canSend()) return false;
       if (!sendButton()) await unwedgeStopPersistently();
       // Wait for Angular to render the send (arrow_upward) button - proof that
       // it registered the text. The Quill-API injection (see setEditorText)
       // fires text-change so this resolves; if it doesn't, the send won't work.
-      await waitFor(() => !!sendButton(), 3000);
+      await waitFor(() => !canSend() || !!sendButton(), 8000);
       // Last resort before the Enter fallback: re-type. A composer that was
       // wedged when setEditorText ran can swallow the insert entirely, leaving
       // an empty editor and therefore no send button - the "Start did nothing,
       // the system prompt was never sent" report. Retyping now that the stop is
       // cleared is safe: the editor is either empty or holds our own text.
-      if (!sendButton() && editorText() !== text) {
+      if (canSend() && !sendButton() && editorText() !== text) {
         diag("send.retype", {});
         await setEditorText(ed, text);
-        await waitFor(() => !!sendButton(), 2000);
+        await waitFor(() => !canSend() || !!sendButton(), 8000);
       }
+      if (!canSend() || !editorText().trim() || isHardGenerating()) return false;
       const btn = sendButton();
       diag("send.click", { found: !!btn, pending: hasPendingAttachment() });
-      if (btn) { btn.click(); return; }
+      if (btn && (btn.disabled || btn.getAttribute("aria-disabled") === "true")) return false;
+      if (btn && attempt % 2 === 0) { btn.click(); return true; }
+      if (!canSend()) return false;
       // Fallback: Enter sends in Gemini's composer.
       const o = { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true };
       ed.dispatchEvent(new KeyboardEvent("keydown", o));
       ed.dispatchEvent(new KeyboardEvent("keyup", o));
+      return true;
     } finally {
-      if (relock) { const e2 = getEditor(); if (e2) e2.setAttribute("contenteditable", "false"); }
+      if (relock && _locked) { const e2 = getEditor(); if (e2) e2.setAttribute("contenteditable", "false"); }
     }
   }
 

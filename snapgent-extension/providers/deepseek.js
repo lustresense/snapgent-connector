@@ -679,39 +679,35 @@ const ZSProvider = (() => {
     return text.slice(0, headLen) + marker + text.slice(text.length - tailLen);
   }
 
-  async function typeAndSend(text, images) {
+  const stagedSendImages = new WeakSet();
+  async function typeAndSend(text, images, canSend = () => true, attempt = 0) {
+    if (!canSend()) return false;
     const editor = getEditor();
-    if (!editor) throw new Error("DeepSeek input box not found");
+    if (!editor) return false;
     editor.focus();
     text = truncateForSend(text);
-    setTextareaValue(editor, text);
-    // Attach images LAST, right before the send click - see gemini.js's
-    // typeAndSend for why (attaching before retyping the text can sever the
-    // site's binding between the pending upload and the message being sent).
-    const hasImages = !!(images && images.length);
-    if (hasImages) {
-      try { await attachImages(images); } catch {}
-      // Wait for the upload to make sending available, then click only once.
-      // Repeated clicks after an ambiguous response can submit duplicate turns.
-      const ready = await waitFor(() => {
-        const btn = document.querySelector(S.sendBtn);
-        return !!btn && !btn.disabled && !isStopBtn(btn) &&
-          btn.getAttribute("aria-disabled") !== "true";
-      }, 25000);
-      if (!ready) return;
-      const btn = document.querySelector(S.sendBtn);
-      if (!btn || btn.disabled || isStopBtn(btn) || btn.getAttribute("aria-disabled") === "true") return;
-      btn.click();
-      await waitFor(() => editorText().trim() === "" || isHardGenerating(), 5000);
-      return;
-    }
-    // Text-only: wait for React to re-enable the send button, then click.
-    await waitFor(() => {
-      const btn = document.querySelector(S.sendBtn);
-      return btn && btn.getAttribute("aria-disabled") !== "true" && !isStopBtn(btn);
-    }, 800);
-    if (!clickSendButton() && !isBusyNow()) {
-      pressEnter(editor);
+    const wasLocked = editor.hasAttribute("readonly");
+    if (wasLocked) editor.removeAttribute("readonly");
+    try {
+      if (editorText() !== text) setTextareaValue(editor, text);
+      if (!canSend() || !editorText().trim()) return false;
+      if (images && images.length && !stagedSendImages.has(images)) {
+        stagedSendImages.add(images);
+        await attachImages(images);
+      }
+      const ready = () => {
+        const b = document.querySelector(S.sendBtn);
+        return b && !b.disabled && !isStopBtn(b) && b.getAttribute("aria-disabled") !== "true";
+      };
+      await waitFor(() => !canSend() || ready(), images && images.length ? 25000 : 8000);
+      if (!canSend() || !editorText().trim() || isHardGenerating()) return false;
+      if (ready() && attempt % 2 === 0) document.querySelector(S.sendBtn).click();
+      else if (ready() || !document.querySelector(S.sendBtn)) pressEnter(editor);
+      else return false;
+      await waitFor(() => !canSend() || !editorText().trim() || isHardGenerating(), 5000);
+      return true;
+    } finally {
+      if (wasLocked && editor.getAttribute("placeholder") === "⏳ Agent working… please wait") editor.setAttribute("readonly", "");
     }
   }
 
