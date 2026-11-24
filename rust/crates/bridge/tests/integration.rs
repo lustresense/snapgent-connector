@@ -96,3 +96,17 @@ async fn explicit_workspace_binding_is_idempotent_and_isolated() {
     assert!(manager.session_backend(&sa, "local").await.is_err());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test]
+async fn project_config_is_not_native_execution_config() {
+    let root = std::env::temp_dir().join(format!("snapgent-config-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("config.json"), "not valid json").unwrap();
+    let private = root.join("private-mcp.json");
+    let state = State::with_config(root.clone(), private.clone(), "ab".repeat(32), vec![]).unwrap();
+    state.manager.start().await.unwrap();
+    assert_eq!(state.manager.snapshot().await["servers"][0]["id"], "local");
+    assert!(!private.exists());
+    state.manager.stop().await;
+    std::fs::remove_dir_all(root).unwrap();
+}

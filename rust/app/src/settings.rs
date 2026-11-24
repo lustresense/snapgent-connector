@@ -22,13 +22,6 @@ impl Settings {
             .find(|p| is_project(p))
             .map(|p| p.to_path_buf())
             .or_else(|| cwd.clone().filter(|p| is_project(p)))
-            .or_else(|| {
-                exe.ancestors()
-                    .skip(1)
-                    .find(|p| p.join("config.json").is_file())
-                    .map(|p| p.to_path_buf())
-            })
-            .or_else(|| cwd.filter(|p| p.join("config.json").is_file()))
             .context("Place Snapgent.exe in the Snapgent project directory")?;
         let directory = env::var_os("LOCALAPPDATA")
             .or_else(|| env::var_os("XDG_STATE_HOME"))

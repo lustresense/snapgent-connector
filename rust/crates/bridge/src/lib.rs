@@ -23,6 +23,10 @@ pub struct State {
 }
 impl State {
     pub fn new(root: PathBuf, token: String, origins: Vec<String>) -> Result<Arc<Self>> {
+        let config_path = root.join("config.json");
+        Self::with_config(root, config_path, token, origins)
+    }
+    pub fn with_config(root: PathBuf, config_path: PathBuf, token: String, origins: Vec<String>) -> Result<Arc<Self>> {
         anyhow::ensure!(
             snapgent_security::valid_nonce(&token),
             "Invalid bridge credential"
@@ -30,7 +34,7 @@ impl State {
         let (catalog, _) = broadcast::channel(32);
         let (shutdown, _) = watch::channel(false);
         Ok(Arc::new(Self {
-            manager: Manager::new(root),
+            manager: Manager::with_config(root, config_path),
             events: EventHub::default(),
             approvals: Approvals::default(),
             token,

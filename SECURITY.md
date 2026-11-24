@@ -11,13 +11,14 @@ Use the native Rust application launched by `start.bat`. Configure the trusted b
 - Explicit local workspace binding and isolation between agent sessions.
 - Workspace-relative filesystem paths, with parent traversal, device paths, alternate data streams, symlinks and reparse points rejected.
 - Local approvals for workspace binding, privileged terminal and Git operations, and administrative MCP changes.
-- Optional external MCP processes require explicit enablement.
+- Optional external MCP processes require explicit enablement. The native desktop stores executable configuration in `%LOCALAPPDATA%/SnapgentSecurity/mcp-config.json`, not the project checkout.
+- Raw filesystem tools reject access to Git, Mercurial and SVN metadata and the bridge security directory. Use approved Git operations instead.
 - Restricted inherited environment variables for MCP processes.
 - Authenticated local dashboard and event endpoints.
 
 ## Limitations
 
-This is not an operating-system sandbox. Approved commands, Git hooks and external MCP executables can access resources or networks permitted to the current OS account. Filesystem checks do not eliminate hard-link attacks, mapped network drives or race conditions. Stop requests cancel queued local calls and signal running local commands; Windows process-tree termination is best-effort, not rollback. Already completed writes, detached child processes and external MCP side effects may survive cancellation. Verify partial changes before repeating commands. UNC paths, including WSL UNC shares, are not supported by local workspace mode.
+This is not an operating-system sandbox. Approved commands, Git hooks and external MCP executables can access resources or networks permitted to the current OS account. Filesystem checks do not eliminate hard-link attacks, short-name aliases, mapped network drives or race conditions. Stop requests cancel queued local calls and signal running local commands; Windows process-tree termination is best-effort, not rollback. Already completed writes, detached child processes and external MCP side effects may survive cancellation. Verify partial changes before repeating commands. UNC paths, including WSL UNC shares, are not supported by local workspace mode.
 
 The obsolete headless and CLI trust flags no longer enable a bridge without a window. Keep the UI's terminal trust option disabled for untrusted tasks. Tool output submitted to a chat is transmitted to the selected AI provider. Do not expose secrets or private files unnecessarily. Use an isolated VM or low-privilege account for untrusted projects.
 

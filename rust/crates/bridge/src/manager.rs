@@ -23,6 +23,7 @@ struct Server {
 
 pub struct Manager {
     root: PathBuf,
+    config_path: PathBuf,
     servers: RwLock<BTreeMap<String, Server>>,
     session_pins: Mutex<HashMap<(String, String), Arc<Workspace>>>,
     bound_roots: Mutex<HashMap<PathBuf, std::sync::Weak<Workspace>>>,
@@ -31,8 +32,13 @@ pub struct Manager {
 
 impl Manager {
     pub fn new(root: PathBuf) -> Self {
+        let config_path = root.join("config.json");
+        Self::with_config(root, config_path)
+    }
+    pub fn with_config(root: PathBuf, config_path: PathBuf) -> Self {
         Self {
             root,
+            config_path,
             servers: RwLock::new(BTreeMap::new()),
             session_pins: Mutex::new(HashMap::new()),
             bound_roots: Mutex::new(HashMap::new()),
@@ -43,7 +49,7 @@ impl Manager {
         &self.root
     }
     fn config_path(&self) -> PathBuf {
-        self.root.join("config.json")
+        self.config_path.clone()
     }
     fn config(&self) -> Result<Value> {
         let path = self.config_path();
@@ -139,7 +145,7 @@ impl Manager {
             .as_str()
             .filter(|s| valid_id(s))
             .context("Invalid MCP server id")?;
-        if id == "local" || id == "roblox" || (matches!(id, "zed" | "vscode") && !remove) {
+        if id == "local" || (matches!(id, "zed" | "vscode") && !remove) {
             bail!("Protected built-in MCP server id");
         }
         let mut config = self.config()?;

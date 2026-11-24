@@ -97,8 +97,9 @@ impl Desktop {
             self.page = Page::Settings;
             return;
         }
-        let state = match State::new(
+        let state = match State::with_config(
             settings.root.clone(),
+            settings.directory.join("mcp-config.json"),
             settings.token.clone(),
             settings.origins(),
         ) {

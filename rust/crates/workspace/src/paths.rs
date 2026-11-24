@@ -10,6 +10,7 @@ pub const IGNORED: &[&str] = &[
     ".git",
     ".hg",
     ".svn",
+    "SnapgentSecurity",
     ".venv",
     "venv",
     "node_modules",
@@ -41,6 +42,19 @@ impl WorkspacePin {
         }
         Ok(candidate)
     }
+}
+
+fn protected_component(name: &std::ffi::OsStr) -> bool {
+    let name = name.to_string_lossy();
+    [".git", ".hg", ".svn", "snapgentsecurity"]
+        .iter()
+        .any(|value| name.eq_ignore_ascii_case(value))
+}
+
+pub fn protected_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(component, Component::Normal(name) if protected_component(name))
+    })
 }
 
 pub fn target(root: &Path, input: &str) -> Result<PathBuf> {
@@ -97,6 +111,9 @@ pub fn target(root: &Path, input: &str) -> Result<PathBuf> {
     {
         bail!("Use a workspace-relative path without parent traversal");
     }
+    if protected_path(path) {
+        bail!("Protected metadata and bridge security directories are not accessible");
+    }
     let root = local_root(root)?;
     let mut current = root.clone();
     for component in path.components() {
@@ -147,6 +164,9 @@ fn is_link_or_reparse(meta: &fs::Metadata) -> bool {
 }
 
 pub fn local_root(path: &Path) -> Result<PathBuf> {
+    if protected_path(path) {
+        bail!("Protected metadata and bridge security directories are not accessible");
+    }
     if !path.is_absolute() {
         bail!("Select an absolute local directory");
     }
@@ -175,6 +195,9 @@ pub fn local_root(path: &Path) -> Result<PathBuf> {
         }
     }
     let root = fs::canonicalize(&current)?;
+    if protected_path(&root) {
+        bail!("Protected metadata and bridge security directories are not accessible");
+    }
     if !root.is_dir() {
         bail!("Workspace must be a directory");
     }
@@ -191,6 +214,9 @@ pub fn local_root(path: &Path) -> Result<PathBuf> {
 }
 
 pub fn safe_directory(path: &Path) -> bool {
+    if protected_path(path) {
+        return false;
+    }
     let Ok(meta) = fs::symlink_metadata(path) else {
         return false;
     };
@@ -221,6 +247,13 @@ mod tests {
         let root = pin.pin(&a).unwrap();
         assert!(pin.pin(&b).is_err());
         assert!(target(&root, "../b/file.txt").is_err());
+        assert!(target(&root, ".git/config").is_err());
+        assert!(target(&root, "nested/.GIT/hooks/pre-commit").is_err());
+        assert!(target(&root, "SnapgentSecurity/bridge-token").is_err());
+        let private = a.join("SnapgentSecurity");
+        fs::create_dir(&private).unwrap();
+        assert!(local_root(&private).is_err());
+        assert!(!safe_directory(&private));
         assert!(target(&root, "sub/file.txt").unwrap().starts_with(&root));
     }
 }
