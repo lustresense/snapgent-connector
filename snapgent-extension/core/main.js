@@ -1134,6 +1134,7 @@
 
   async function runTool(call, turn) {
     await targetReady;
+    const dispatchConversation = P.conversationKey();
     const name = call.tool;
     const args = call.arguments || {};
     // The bridge dedupes a re-rendered turn against the result it already produced,
@@ -1360,7 +1361,7 @@
       ui.banner("warn","Choose workspace","Use the Workspace button in the Snapgent bar, then continue this conversation.");
       return "ERROR: No workspace selected. Ask the user to choose the workspace in the Snapgent bar before continuing.";
     }
-    if (A.stop) return "ERROR: command not run - stopped.";
+    if (A.stop || (dispatchConversation && P.conversationKey() !== dispatchConversation)) return "ERROR: command not run - stopped or conversation changed.";
     const workspaceFields = boundWorkspace ? {workspace:boundWorkspace.workspace,session:boundWorkspace.session} : {};
     const timeout = name === "execute_luau" ? 20000 : 120000;
     // Hard watchdog: even if the background worker never answers, the loop
@@ -1494,6 +1495,7 @@
       }
       diag("bridge.disconnectedRetry", { name });
       await new Promise((res) => setTimeout(res, 1200));
+      if (A.stop || (dispatchConversation && P.conversationKey() !== dispatchConversation)) return "ERROR: command not retried - stopped or conversation changed.";
       const retry = await Promise.race([
         bg({ type: "call_tool", name, arguments: args, timeout, server: selectedTargetId, turn: turnKeyForCache, ...workspaceFields }),
         hardCap,
@@ -1660,7 +1662,7 @@
     A.stop = false;
     A.stopping = false; // clean slate: never inherit a stale "Stopping…" from a
                         // Stop click that landed before this loop actually started
-    A.loopKey = null; // pinned by syncSessionState once this chat has an id + content
+    A.loopKey = P.conversationKey() || null; // pin an existing conversation immediately
     let truncCount = 0;
     const MAX_TRUNC = 6;
     // Re-send the command list after this many successful tool calls. Kept high

@@ -1,29 +1,30 @@
-# Stability recovery candidate
+# Stability recovery — native runtime and browser extension
 
-Base: upstream-compatible browser extension and hardened Rust/Python bridge at fff1497.
-This branch restores mutual HMAC authentication before marking the socket ready.
-It keeps the exact trusted extension origin policy, credential storage in extension-origin IndexedDB, and existing terminal approvals.
+The changes are committed directly to main. Use the matching extension and rebuild the native runtime after pulling the latest main. No ZIP is required.
 
-## Install and verify (Windows)
+## Changes
+- Mutual HMAC authentication, native/manual pairing, authenticated connection status, and reconnect handling.
+- Per-provider target defaults; target changes are blocked during active runs.
+- Explicit workspace selector with recent local Zed folders and a manual absolute folder path. Local approval is required for a new binding.
+- Saved workspace and session identifiers are scoped by provider, target, and conversation. After bridge restart, the same root is reapproved without requiring a new chat. No automatic selection of a different root.
+- Shared workspace locking serializes built-in operations on the same canonical root.
+- Steering accepts extra user instructions at the next tool-result or final-response checkpoint. It does not stop the agent or interrupt an in-flight tool.
+- Gemini composer fallback, and user-send interception for ChatGPT, DeepSeek and Gemini.
+- Uncertain write outcomes are not automatically replayed.
 
-1. Stop all old bridge instances and start the existing native Rust bridge. Do not run Python and Rust together on the same port.
-2. Replace the unpacked extension files with this branch's snapgent-extension directory, preserving the original directory path. Reload in chrome://extensions and refresh AI tabs.
-3. Check the extension ID matches the trusted ID in the native app. Enable automatic pairing from the app if available. In the extension popup use Pair bridge with an empty field for native pairing, or enter the local credential from the bridge settings. Never put credentials in chat.
-4. Check the popup shows Connected and the Zed tool catalogue. Use a read-only command in each provider. Disconnect and reconnect the bridge when idle, then verify the same target.
-5. While an agent is running, type in the overlay steering field, click Steer, and verify that the instruction is appended to the next result or final-response continuation without stopping the agent.
+## Local upgrade
+Stop the native app and exit its tray icon; update the local checkout from main, rebuild with development/build-native.ps1, reload the unpacked extension at its existing path, and start the rebuilt native runtime. Check that the trusted extension ID matches. Pair via the popup if needed. Select Zed and choose a workspace from the bar. Approve the selected folder in the native app.
 
-## Verification status
-
-- JavaScript syntax parsed for the six changed JS files.
-- Eight transport assertions passed in an isolated WebSocket/crypto mock using the actual background.js source from the first patch. This does not prove the live bridge or real cryptography.
-- test-auth-transport.js added to exercise the real HMAC proof via Node WebCrypto. Run it and the existing test-*.js suites locally; Node tests have not been executed against this branch in a browser/Windows environment.
-- No Windows runtime test, benchmark, or live provider DOM test has been performed in this remote session.
-- Steering and target selection changes are candidate features, not live verified. A provider may still need adjustments to its send hooks.
-- Explicit multi-workspace selection, persistent workspace binding across restart, durable request replay across sockets, complete provider regression testing, and repository restructuring remain open. Current legacy-compatible RPCs do not provide per-conversation workspace isolation. Do not run simultaneous writes to different projects until explicit binding is implemented and tested.
-- The main branch is intentionally unchanged until candidate verification.
+## Test status
+- Syntax parsing passed for modified JS files.
+- 15 isolated WebSocket/crypto-mock assertions on the current background transport passed, including conflicting binding rejection, same-root rebind after reconnect, rejection of invalid server proof and ambiguous write outcomes.
+- The Node WebCrypto authentication regression test and Rust workspace binding integration test are included, but not executed here against a native build.
+- Native Windows build, live browser/provider DOM, manual approval/restart, multi-window behavior and benchmarks are not verified remotely. Full provider coverage, repository restructuring, durable replay across bridge restart, exact active-window enumeration and resource/performance measurements remain open.
+- Do not treat this as a production-certified release. Recent Zed folders are not proof of currently open windows; VS Code discovery lists the most recent local folder, with manual path selection available.
+- During a pending tool call, stopping the browser loop does not guarantee cancellation of the native operation. Verify outcome before repeating a write.
 
 ## Regression commands
-
 ```powershell
 Get-ChildItem .\snapgent-extension\test-*.js | ForEach-Object { node $_.FullName; if ($LASTEXITCODE -ne 0) { throw "Test failed: $($_.Name)" } }
+cargo test --manifest-path rust/Cargo.toml --workspace
 ```
