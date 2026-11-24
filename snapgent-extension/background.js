@@ -151,8 +151,9 @@ function nativeCredential() {
 async function getCredential() {
   const cached = await credentialStore("readonly");
   if (validCredential(cached)) return cached;
+  const revision = credentialRevision;
   const value = await nativeCredential();
-  if (validCredential(value)) {
+  if (validCredential(value) && revision === credentialRevision) {
     await credentialStore("readwrite", value);
     return value;
   }
@@ -557,8 +558,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         try {
           const token = typeof msg.token === "string" && msg.token.trim() ? msg.token.trim() : await nativeCredential();
           if (!validCredential(token)) { sendResponse({ok:false,error:"Enable automatic pairing in Snapgent, or enter the 64-character local credential."}); break; }
-          await credentialStore("readwrite", token);
           credentialRevision++;
+          await credentialStore("readwrite", token);
           connectionState = "offline"; connectionError = "";
           const old = ws;
           ws = null; connected = false; stopHeartbeat(); failAllPending("Pairing changed");

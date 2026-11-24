@@ -1467,7 +1467,10 @@ const ZSProvider = (() => {
         const ed = getEditor();
         if (!ed || !ed.contains(e.target)) return;
         if (editorText().trim() === "") return;
-        if (handlers.isBlocked()) return;
+        if (handlers.isBlocked()) {
+          if (e.isTrusted) { e.preventDefault(); e.stopImmediatePropagation(); }
+          return;
+        }
         // No session yet → nudge toward Start, but NEVER block the send. The
         // user is entitled to just chat with ChatGPT; the extension is opt-in.
         // This used to preventDefault + stopImmediatePropagation (ported from an
@@ -1501,7 +1504,10 @@ const ZSProvider = (() => {
         if (stop) { handlers.onNativeStop(); return; }
         const btn = t && t.closest && t.closest(S.submitBtn);
         if (!btn || isStopBtn(btn)) return;
-        if (handlers.isBlocked()) return;
+        if (handlers.isBlocked()) {
+          if (e.isTrusted) { e.preventDefault(); e.stopImmediatePropagation(); }
+          return;
+        }
         // Same as the keydown path: nudge, never block (see the comment there).
         if (!handlers.isStarted()) {
           if (!chatIsEmpty()) return;

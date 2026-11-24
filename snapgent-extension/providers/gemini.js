@@ -571,7 +571,10 @@ const ZSProvider = (() => {
         const ed = getEditor();
         if (!ed || !ed.contains(e.target)) return;
         if (editorText().trim() === "") return;
-        if (handlers.isBlocked()) return;
+        if (handlers.isBlocked()) {
+          if (e.isTrusted) { e.preventDefault(); e.stopImmediatePropagation(); }
+          return;
+        }
         if (!handlers.isStarted()) {
           if (!chatIsEmpty()) return; // existing conversation → not ours to gate
           handlers.onBlockedAttempt(); // nudge only; never block plain chat
@@ -601,7 +604,10 @@ const ZSProvider = (() => {
           return;
         }
         if (ic !== "arrow_upward") return;
-        if (handlers.isBlocked()) return;
+        if (handlers.isBlocked()) {
+          if (e.isTrusted) { e.preventDefault(); e.stopImmediatePropagation(); }
+          return;
+        }
         if (!handlers.isStarted()) {
           if (!chatIsEmpty()) return;
           handlers.onBlockedAttempt(); // nudge only; never block plain chat

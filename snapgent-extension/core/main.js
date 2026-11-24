@@ -97,7 +97,8 @@
     { name: "Grok", url: "https://grok.com/" },
     { name: "Mistral", url: "https://chat.mistral.ai/code" },
   ];
-  const TARGET_STORAGE_KEY = "zsSelectedMcpTarget";
+  const LEGACY_TARGET_STORAGE_KEY = "zsSelectedMcpTarget";
+  const TARGET_STORAGE_KEY = LEGACY_TARGET_STORAGE_KEY + ":" + P.id;
   // Collapsed-status preference: the floating status card can be hidden, leaving
   // a small round blue button that brings it back. Persisted so a reload keeps
   // the user's choice instead of forcing the card back.
@@ -174,9 +175,15 @@
     return value;
   }
   let selectedTargetId = "none";
+  let targetChangedLocally = false;
+  let resolveTargetReady;
+  const targetReady = new Promise(resolve => { resolveTargetReady = resolve; });
+  setTimeout(resolveTargetReady, 2000);
   try {
-    chrome.storage.local.get(TARGET_STORAGE_KEY, (result) => {
-      const saved = result && result[TARGET_STORAGE_KEY];
+    chrome.storage.local.get([TARGET_STORAGE_KEY, LEGACY_TARGET_STORAGE_KEY], (result) => {
+      const saved = result && (result[TARGET_STORAGE_KEY] || result[LEGACY_TARGET_STORAGE_KEY]);
+      resolveTargetReady();
+      if (targetChangedLocally) return;
       if (typeof saved === "string" && saved) {
         selectedTargetId = saved;
         refreshActiveToolNames();
@@ -388,6 +395,8 @@
   }
 
   async function submitAndGetBase(text, images) {
+    const steering = A.running && !A.stop ? steeringQueue.slice() : [];
+    if (steering.length) text += steeringText(steering);
     captureSendToken();
     diag("send", { text: String(text).slice(0, 60), busy: P.isBusyNow() });
     A.injecting = true;
@@ -465,6 +474,7 @@
         }, 3500);
         tries++;
       }
+      if ((messageSent || landed()) && steering.length) steeringQueue.splice(0, steering.length);
       if (messageSent) diag("send.cleared", { tries });
       // All retries exhausted with NO evidence the message landed (textarea never
       // cleared, no new turn). Silently returning here left the loop waiting for
@@ -1082,6 +1092,7 @@
   }
 
   async function runTool(call, turn) {
+    await targetReady;
     const name = call.tool;
     const args = call.arguments || {};
     // The bridge dedupes a re-rendered turn against the result it already produced,
@@ -1465,6 +1476,10 @@
         return ZS.FEEDBACK.bridgeOffline;
       }
     }
+    if (r.kind === "timeout" && r.sent !== false) {
+      ui.banner("warn", "Tool outcome unknown", `Check whether ${name} completed before retrying.`);
+      return ZSGuard.inFlightFailure(name);
+    }
     if (r.kind === "timeout") {
       return `ERROR: tool '${name}' timed out after ${name === "execute_luau" ? 20 : 120}s.\n${r.error}\nTry a shorter/simpler call or check that the selected target app is open and responsive.`;
     }
@@ -1584,9 +1599,15 @@
   // ════════════════════════════════════════════════════════════════════════
   //  AGENTIC LOOP
   // ════════════════════════════════════════════════════════════════════════
+  // Steering is user-authored input, scoped to the current running loop.
+  const steeringQueue = [];
+  function steeringText(messages) {
+    return "\n\nAdditional instructions from the user (steering):\n" + messages.map((m,i) => `${i+1}. ${m}`).join("\n") + "\nContinue the original task with these additional instructions. Do not restart completed work.";
+  }
   async function agentLoop(base) {
     if (A.running) return;
     A.running = true;
+    steeringQueue.length = 0;
     A.resumeArmed = false; // loop now owns the turn; drop the regenerate grace
     A.stop = false;
     A.stopping = false; // clean slate: never inherit a stale "Stopping…" from a
@@ -1732,7 +1753,13 @@
           base = await submitAndGetBase(ZS.FEEDBACK.parseError(res.reason, failName));
           continue;
         }
-        if (res.kind === "text") break; // final answer
+        if (res.kind === "text") {
+          if (steeringQueue.length) {
+            base = await submitAndGetBase("Continue the task using the following additional user instructions.");
+            continue;
+          }
+          break;
+        }
 
         if (res.kind === "tool") {
           const calls = res.calls;
@@ -1894,6 +1921,10 @@
       diag("loop.error", { msg: String((e && e.message) || e) });
       ui.banner("warn", "Internal loop error", String((e && e.message) || e));
     } finally {
+      if (steeringQueue.length) {
+        ui.banner("warn", "Unsent steering instructions", steeringQueue.join("\n\n"));
+        steeringQueue.length = 0;
+      }
       A.running = false;
       A.stop = false;
       // Keep the "Stopping…" state while the site's stream is still draining
@@ -2499,6 +2530,7 @@
   //  SESSION BOOTSTRAP  ("Starting Up" animated chip, shown in the conversation)
   // ════════════════════════════════════════════════════════════════════════
   async function startSession() {
+    await targetReady;
     if (A.running || A.starting) return;
     if (selectedTargetId === "none") {
       ui.toast("Select an MCP target first.");
@@ -3608,10 +3640,16 @@
         // Switching is always allowed (even while a session is running).
         // After the new target is persisted, reload the page so the whole
         // extension restarts cleanly against the newly selected MCP server.
+        if (A.running || A.starting || A.injecting || A.toolRunning || A.stopping) {
+          setTarget(selectedTargetId);
+          toast("Finish or stop this run before changing the target.");
+          return;
+        }
+        targetChangedLocally = true;
         selectedTargetId = targetSelect.value || "none";
         const reloadPage = () => { try { location.reload(); } catch {} };
         try {
-          chrome.storage.local.set({ [TARGET_STORAGE_KEY]: selectedTargetId }, reloadPage);
+          chrome.storage.local.set({ [TARGET_STORAGE_KEY]: selectedTargetId, [LEGACY_TARGET_STORAGE_KEY]: selectedTargetId }, reloadPage);
         } catch (error) {
           console.error("[snapgentV3] Could not save selected MCP target:", error);
           reloadPage();
@@ -3791,7 +3829,7 @@
         targetSelect.dataset.optionsKey = optionsKey;
       }
       targetSelect.value = id;
-      targetSelect.disabled = false; // never locked: the user may switch MCP target at any time
+      targetSelect.disabled = !!(A.running || A.starting || A.injecting || A.toolRunning || A.stopping);
       const nameEl = root && root.querySelector("#zs-target-name");
       if (nameEl) nameEl.textContent = (options.find((option) => option.id === id) || { name: id }).name;
       if (targetMenuEl && !targetMenuEl.hidden) renderTargetMenu();
@@ -3885,17 +3923,8 @@
 
       const close = () => {
         pop.remove();
-        // If the active target was just disabled, move to the first enabled one
-        // and reload so the whole extension restarts against it.
-        if (!isMcpEnabled(selectedTargetId)) {
-          const next = allMcpOptions().find((o) => isMcpEnabled(o.id));
-          if (next) {
-            selectedTargetId = next.id;
-            const reloadPage = () => { try { location.reload(); } catch {} };
-            try { chrome.storage.local.set({ [TARGET_STORAGE_KEY]: selectedTargetId }, reloadPage); } catch { reloadPage(); }
-            return;
-          }
-        }
+        // Never silently redirect an active conversation to a different server.
+        if (!isMcpEnabled(selectedTargetId)) toast("Selected target disabled. Choose another target explicitly.");
         setTarget(selectedTargetId);
       };
       pop.addEventListener("click", (e) => { if (e.target === pop) close(); });
@@ -4912,7 +4941,14 @@
         return;
       }
       if (!on) {
-        if (cover) { cover.style.display = "none"; cover.dataset.on = ""; }
+        if (cover) {
+          cover.style.display = "none"; cover.dataset.on = "";
+          const draft = cover.querySelector(".zs-steer-input");
+          if (draft && !A.running && draft.value.trim()) {
+            banner("warn", "Unsent steering draft", draft.value);
+            draft.value = "";
+          }
+        }
         if (ed) ed.classList.remove("zs-typing");
         // Agent finished: the composer's own placeholder ("Ask ChatGPT") must
         // come back the moment the cover is lifted (user request 2026-11-18).
@@ -4928,9 +4964,24 @@
       if (!cover) {
         cover = document.createElement("div");
         cover.id = "zs-input-cover";
-        cover.innerHTML = `<span class="zs-cover-spin" aria-hidden="true"></span><span class="zs-cover-main">Agent is working…</span>`;
+        cover.innerHTML = `<span class="zs-cover-spin" aria-hidden="true"></span><span class="zs-cover-main">Agent is working…</span><input class="zs-steer-input" type="text" maxlength="4000" placeholder="Add instructions…" aria-label="Additional instructions" autocomplete="off"><button type="button" class="zs-steer-btn">Steer</button>`;
+        const draft = cover.querySelector(".zs-steer-input");
+        const steer = cover.querySelector(".zs-steer-btn");
+        const queue = () => {
+          const text = draft.value.trim();
+          if (!A.running || A.stop || A.stopping || !text) return;
+          if (steeringQueue.length >= 8) { toast("Steering queue full"); return; }
+          steeringQueue.push(text); draft.value = "";
+          toast("Steering queued for the next agent checkpoint.");
+        };
+        draft.addEventListener("keydown", event => {
+          event.stopPropagation();
+          if (event.key === "Enter" && !event.isComposing) { event.preventDefault(); queue(); }
+        });
+        steer.addEventListener("click", event => { event.preventDefault(); event.stopPropagation(); queue(); });
         document.documentElement.appendChild(cover);
       }
+      cover.classList.toggle("zs-can-steer", A.running && !A.stopping && !A.stop);
       cover.dataset.on = "1"; // intent flag: keep the place() loop alive while set
       cover.style.display = "flex";
       const place = () => {
@@ -5539,7 +5590,7 @@
       const key = P.conversationKey();
       if (A.startingKey == null) {
         if (key && !P.chatIsEmpty()) A.startingKey = key; // pin the stable id
-      } else if (key !== A.startingKey && P.chatIsEmpty()) {
+      } else if (key !== A.startingKey) {
         A.startGen++;
         A.starting = false;
         A.startingKey = null;
@@ -5565,7 +5616,7 @@
       const key = P.conversationKey();
       if (A.loopKey == null) {
         if (key && !P.chatIsEmpty()) A.loopKey = key; // pin the loop's conversation
-      } else if (key !== A.loopKey && P.chatIsEmpty()) {
+      } else if (key !== A.loopKey) {
         diag("loop.abandonedNewChat", { from: A.loopKey, to: key });
         A.stop = true;       // the loop breaks at its next checkpoint; its finally
         A.loopKey = null;    // resets A.running / cover / lock, then state recomputes

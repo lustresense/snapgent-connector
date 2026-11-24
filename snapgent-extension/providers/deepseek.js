@@ -836,7 +836,10 @@ const ZSProvider = (() => {
         const text = editorText().trim();
         if (text === "") return;
 
-        if (handlers.isBlocked()) return;
+        if (handlers.isBlocked()) {
+          if (e.isTrusted) { e.preventDefault(); e.stopImmediatePropagation(); }
+          return;
+        }
 
         // No session yet → the user must click "Start session" first. ONLY on a
         // blank chat: an existing conversation isn't ours to gate.
@@ -872,7 +875,10 @@ const ZSProvider = (() => {
           return;
         }
         if (btn.getAttribute("aria-disabled") === "true") return;
-        if (handlers.isBlocked()) return;
+        if (handlers.isBlocked()) {
+          if (e.isTrusted) { e.preventDefault(); e.stopImmediatePropagation(); }
+          return;
+        }
         if (!handlers.isStarted()) {
           if (!chatIsEmpty()) return;
           handlers.onBlockedAttempt(); // nudge only; never block plain chat
