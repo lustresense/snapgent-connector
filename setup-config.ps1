@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$RobloxVersionsPath = (Join-Path $env:LOCALAPPDATA "Roblox\Versions"),
     [string]$ConfigPath = (Join-Path $PSScriptRoot "config.json")
 )
@@ -276,6 +276,13 @@ if ($wordUvx) {
 }
 else {
     Write-Host "uv not found; Word MCP not configured. Install uv from https://docs.astral.sh/uv/ and run this script again."
+}
+
+$zedMcp = Join-Path $PSScriptRoot "zed_mcp.py"
+$zedPython = Get-Command py.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($zedPython -and (Test-Path -LiteralPath $zedMcp -PathType Leaf) -and -not $configuration.mcpServers.PSObject.Properties["zed"]) {
+    Set-ConfigProperty -Object $configuration.mcpServers -Name "zed" -Value ([pscustomobject]@{command=$zedPython.Source; args=@("-3", $zedMcp); env=[pscustomobject]@{}})
+    Write-Host "Zed MCP configured: $zedMcp"
 }
 
 $json = ConvertTo-Json -InputObject $configuration -Depth 20

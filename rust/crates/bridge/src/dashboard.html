@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>snapgentV3 bridge · live</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+ :root{color-scheme:dark}
+ body{margin:0;background:#0d0f12;color:#e6e6ea;font:13px/1.45 ui-sans-serif,"Segoe UI",sans-serif}
+ header{display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid #23262d;position:sticky;top:0;background:#0d0f12}
+ h1{font-size:14px;margin:0;font-weight:700;letter-spacing:.2px}
+ .dot{width:8px;height:8px;border-radius:50%;background:#5cbf9a;box-shadow:0 0 8px #5cbf9a}
+ .dot.busy{background:#eab308;box-shadow:0 0 8px #eab308}
+ .muted{color:#8a8f9a}
+ .mono{font-variant-numeric:tabular-nums;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+ #now{padding:12px 18px;border-bottom:1px solid #23262d}
+ #now .row{display:flex;justify-content:space-between;gap:12px;padding:3px 0}
+ table{width:100%;border-collapse:collapse}
+ th,td{text-align:left;padding:6px 18px;border-bottom:1px solid #171a1f;white-space:nowrap}
+ th{color:#8a8f9a;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.6px}
+ tr.start td:nth-child(2){color:#fde68a}
+ tr.end td:nth-child(2){color:#5cbf9a}
+ tr.end.bad td:nth-child(2){color:#ef6b6b}
+ td.cmd{max-width:46vw;overflow:hidden;text-overflow:ellipsis}
+</style></head><body>
+<header><span class="dot" id="dot"></span><h1>snapgentV3 bridge</h1>
+ <span class="muted mono" id="meta">connecting…</span></header>
+<div id="now"><div class="row muted"><span>running now</span><span class="mono" id="queue">0</span></div><div id="busy"></div></div>
+<table><thead><tr><th>time</th><th>event</th><th>tool</th><th>ms</th><th>tok</th><th>detail</th></tr></thead>
+<tbody id="rows"></tbody></table>
+<script>
+const rows=document.getElementById('rows'), dot=document.getElementById('dot'),
+      meta=document.getElementById('meta'), busy=document.getElementById('busy'),
+      queue=document.getElementById('queue');
+const esc=(s)=>String(s==null?'':s).replace(/[&<>"]/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function add(f){
+  const tr=document.createElement('tr');
+  const bad=f.ok===false||f.error;
+  tr.className=(f.event==='tool_start'?'start':f.event==='tool_end'?'end':'')+(bad?' bad':'');
+  const t=new Date((f.at||Date.now()/1000)*1000).toLocaleTimeString();
+  const detail=f.error||f.detail||f.phase||f.server||(f.chars!=null?f.chars+' chars':'');
+  tr.innerHTML='<td class="mono muted">'+t+'</td><td>'+esc(f.event)+'</td><td class="cmd">'+esc(f.tool||'')+
+    '</td><td class="mono">'+(f.ms!=null?esc(f.ms):'')+'</td><td class="mono">'+(f.tok!=null?esc(f.tok):'')+
+    '</td><td class="cmd muted">'+esc(detail)+'</td>';
+  rows.prepend(tr);
+  while(rows.children.length>200) rows.lastChild.remove();
+}
+async function poll(){
+  try{
+    const s=await (await fetch('/status',{cache:'no-store'})).json();
+    meta.textContent='v'+(s.version||'?')+' · seq '+s.seq+' · '+s.subscribers+' subscriber(s)';
+    queue.textContent=s.queue;
+    dot.className='dot'+(s.queue?' busy':'');
+    busy.innerHTML=(s.busy||[]).map(b=>'<div class="row"><span>'+esc(b.tool||'?')+
+      '</span><span class="mono">'+(((b.elapsed_ms||0)/1000).toFixed(1))+'s</span></div>').join('')
+      ||'<div class="row muted"><span>idle</span><span></span></div>';
+  }catch(e){ meta.textContent='bridge unreachable'; dot.className='dot busy'; }
+}
+const es=new EventSource('/events');
+es.onmessage=()=>{};
+['tool_start','tool_end','tool_loading','stream','stall'].forEach(n=>es.addEventListener(n,e=>{
+  try{ add(Object.assign({event:n},JSON.parse(e.data))); }catch(_){}
+}));
+poll(); setInterval(poll,1000);
+</script></body></html>

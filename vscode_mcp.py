@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -117,15 +118,45 @@ def _vscode_storage_paths() -> List[Path]:
     ]
 
 
-def get_root() -> Path:
-    active = _vscode_active_folder()
+_locked_workspace: Optional[Path] = None
+
+
+def lock_workspace(active: Optional[Path]) -> Path:
+    global _locked_workspace
     if active is None:
-        raise RuntimeError("Open a project folder in VS Code before using the VS Code MCP server.")
-    return active.resolve()
+        raise RuntimeError('Open one local project folder before using the MCP server.')
+    candidate = active.resolve(strict=True)
+    if not candidate.is_dir():
+        raise RuntimeError('Workspace must be a directory.')
+    lock_path = os.environ.get('ZS_WORKSPACE_LOCK_FILE')
+    if lock_path:
+        persistent = Path(lock_path)
+        try:
+            with persistent.open('x', encoding='utf-8') as handle:
+                handle.write(str(candidate))
+        except FileExistsError:
+            pinned = Path(persistent.read_text(encoding='utf-8'))
+            if candidate != pinned:
+                raise RuntimeError('Workspace changed. Restart MCP intentionally before accessing the new project.')
+    if _locked_workspace is None:
+        _locked_workspace = candidate
+    elif candidate != _locked_workspace:
+        raise RuntimeError('Workspace changed. Restart MCP intentionally before accessing the new project.')
+    return _locked_workspace
+
+
+def get_root() -> Path:
+    return lock_workspace(_vscode_active_folder())
 
 
 def normalize_target(rel_or_abs: str, root: Path) -> Path:
     path = Path(rel_or_abs or ".")
+    if os.name == 'nt':
+        if str(path).startswith(('\\\\?\\', '\\\\.\\')):
+            raise ValueError('Windows device namespaces are not permitted.')
+        for part in path.parts[1:] if path.anchor else path.parts:
+            if ':' in part or Path(part).is_reserved():
+                raise ValueError('Windows device paths and alternate data streams are not permitted.')
     if not path.is_absolute():
         path = root / path
     target = path.resolve()
@@ -140,17 +171,43 @@ def _relative(path: Path, root: Path) -> str:
     return path.relative_to(root).as_posix() or "."
 
 
-def _iter_files(base: Path) -> Iterable[Path]:
+def _within_root(path: Path, root: Path) -> bool:
+    try:
+        normalize_target(str(path), root)
+        return True
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
+def _safe_walk_directory(path: Path, root: Path) -> bool:
+    try:
+        attrs = path.lstat()
+        return (_within_root(path, root)
+                and not stat.S_ISLNK(attrs.st_mode)
+                and not (getattr(attrs, 'st_file_attributes', 0) & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 1024)))
+    except OSError:
+        return False
+
+
+def _iter_files(base: Path, root: Optional[Path] = None) -> Iterable[Path]:
+    root = root or base
     if base.is_file():
-        yield base
+        if _within_root(base, root):
+            yield base
         return
-    for current, dirs, names in os.walk(base):
+    for current, dirs, names in os.walk(base, followlinks=False):
+        current_path = Path(current)
+        if not _within_root(current_path, root):
+            dirs[:] = []
+            continue
         dirs[:] = sorted(
             name for name in dirs
-            if name not in IGNORED_DIRECTORIES
+            if name not in IGNORED_DIRECTORIES and _safe_walk_directory(current_path / name, root)
         )
         for name in sorted(names):
-            yield Path(current) / name
+            candidate = current_path / name
+            if _within_root(candidate, root) and candidate.is_file():
+                yield candidate
 
 
 def _run_process(command: List[str], root: Path, timeout: int = 30) -> str:
@@ -188,6 +245,8 @@ def get_project_info() -> Dict[str, Any]:
     for filename in ("package.json", "pyproject.toml", "Cargo.toml", "go.mod", "pom.xml", "*.sln"):
         candidates = sorted(root.glob(filename))[:10]
         for candidate in candidates:
+            if not _within_root(candidate, root):
+                continue
             entry: Dict[str, Any] = {"path": _relative(candidate, root)}
             if candidate.name == "package.json":
                 try:
@@ -214,7 +273,7 @@ def list_dir(path: str = ".") -> List[Dict[str, str]]:
             "path": _relative(child, root),
             "type": "directory" if child.is_dir() else "file",
         }
-        for child in sorted(target.iterdir(), key=lambda item: (item.is_file(), item.name.lower()))
+        for child in sorted((item for item in target.iterdir() if _within_root(item, root)), key=lambda item: (item.is_file(), item.name.lower()))
     ]
 
 
@@ -225,15 +284,20 @@ def list_tree(path: str = ".", max_depth: int = 3) -> List[Dict[str, Any]]:
         raise NotADirectoryError(f"Not a directory: {path}")
     depth_limit = max(0, min(int(max_depth), 8))
     result: List[Dict[str, Any]] = []
-    for current, dirs, files in os.walk(target):
+    for current, dirs, files in os.walk(target, followlinks=False):
         current_path = Path(current)
+        if not _within_root(current_path, root):
+            dirs[:] = []
+            continue
         depth = len(current_path.relative_to(target).parts)
         dirs[:] = sorted(
             name for name in dirs
-            if name not in IGNORED_DIRECTORIES
+            if name not in IGNORED_DIRECTORIES and _safe_walk_directory(current_path / name, root)
         )
         for name in sorted(dirs) + sorted(files):
             entry_path = current_path / name
+            if not _within_root(entry_path, root):
+                continue
             result.append({
                 "path": _relative(entry_path, root),
                 "type": "directory" if entry_path.is_dir() else "file",
@@ -254,7 +318,7 @@ def find_files(path: str = ".", pattern: str = "*") -> List[str]:
         raise NotADirectoryError(f"Not a directory: {path}")
     matches = [
         _relative(file_path, root)
-        for file_path in _iter_files(base)
+        for file_path in _iter_files(base, root)
         if fnmatch.fnmatch(file_path.name, pattern)
         or fnmatch.fnmatch(_relative(file_path, base), pattern)
     ]
@@ -270,13 +334,13 @@ def search_files(path: str, query: str, file_pattern: str = "*", case_sensitive:
         raise ValueError("Search query cannot be empty.")
     needle = query if case_sensitive else query.lower()
     matches: List[Dict[str, Any]] = []
-    files = [target] if target.is_file() else _iter_files(target)
+    files = [target] if target.is_file() else _iter_files(target, root)
     for file_path in files:
         if not fnmatch.fnmatch(file_path.name, file_pattern):
             continue
         try:
-            text = file_path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+            text = normalize_target(str(file_path), root).read_text(encoding="utf-8", errors="replace")
+        except (OSError, ValueError, RuntimeError):
             continue
         for line_number, line in enumerate(text.splitlines(), start=1):
             haystack = line if case_sensitive else line.lower()
@@ -516,7 +580,7 @@ def run_command(command: str, args: Optional[List[str]] = None) -> str:
 def _package_script_command(script: str, root: Path) -> List[str]:
     if script not in SAFE_PROJECT_SCRIPTS:
         raise ValueError(f"Script must be one of: {', '.join(sorted(SAFE_PROJECT_SCRIPTS))}.")
-    package_path = root / "package.json"
+    package_path = normalize_target("package.json", root)
     if not package_path.is_file():
         raise FileNotFoundError("No package.json found in the workspace root.")
     try:

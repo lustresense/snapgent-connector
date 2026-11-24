@@ -1,0 +1,14 @@
+[package]
+name = "snapgent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+eframe.workspace = true
+tray-icon.workspace = true
+snapgent-bridge = { path = "../crates/bridge" }
+snapgent-security = { path = "../crates/security" }

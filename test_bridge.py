@@ -11,6 +11,26 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import bridge
+from bridge_security import fresh_nonce, authentication_proof
+
+TEST_TOKEN = 'ab' * 32
+TEST_ORIGIN = 'chrome-extension://abcdefghijklmnop'
+
+async def authenticate_test_client(client):
+    nonce = fresh_nonce()
+    await client.send(json.dumps({'type': 'auth_hello', 'nonce': nonce}))
+    challenge = json.loads(await client.recv())
+    assert challenge['type'] == 'auth_challenge'
+    assert challenge['proof'] == authentication_proof(TEST_TOKEN, 'server', nonce, challenge['nonce'])
+    await client.send(json.dumps({'type': 'authenticate', 'proof': authentication_proof(TEST_TOKEN, 'client', nonce, challenge['nonce'])}))
+    ack = json.loads(await client.recv())
+    assert ack['type'] == 'authenticated'
+
+@contextlib.asynccontextmanager
+async def authenticated_connect(*args, **kwargs):
+    async with bridge.websockets.connect(*args, **kwargs) as client:
+        await authenticate_test_client(client)
+        yield client
 
 
 MOCK_MCP = r"""
@@ -68,7 +88,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             ),
             encoding="utf-8",
         )
-        manager = bridge.Bridge()
+        manager = bridge.Bridge(auth_token=TEST_TOKEN, trusted_origins=(TEST_ORIGIN,))
         with patch.object(bridge, "CONFIG_PATH", config_path):
             await manager.start_servers()
             try:
@@ -76,7 +96,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     manager.handle_client, "127.0.0.1", 0, max_size=None
                 ) as server:
                     port = server.sockets[0].getsockname()[1]
-                    async with bridge.websockets.connect(
+                    async with authenticated_connect(
                         f"ws://127.0.0.1:{port}", max_size=None
                     ) as client:
                         await client.recv()  # initial "connected" message
@@ -145,7 +165,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 encoding="utf-8",
             )
-            manager = bridge.Bridge()
+            manager = bridge.Bridge(auth_token=TEST_TOKEN, trusted_origins=(TEST_ORIGIN,))
             with patch.object(bridge, "CONFIG_PATH", config_path):
                 await manager.start_servers()
                 try:
@@ -153,7 +173,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                         manager.handle_client, "127.0.0.1", 0
                     ) as server:
                         port = server.sockets[0].getsockname()[1]
-                        async with bridge.websockets.connect(f"ws://127.0.0.1:{port}") as client:
+                        async with authenticated_connect(f"ws://127.0.0.1:{port}") as client:
                             connected = json.loads(await client.recv())
                             self.assertEqual(connected["type"], "connected")
                             self.assertEqual(connected["servers"][0]["id"], "mock")
@@ -205,7 +225,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 encoding="utf-8",
             )
-            manager = bridge.Bridge()
+            manager = bridge.Bridge(auth_token=TEST_TOKEN, trusted_origins=(TEST_ORIGIN,))
             with patch.object(bridge, "CONFIG_PATH", config_path):
                 await manager.start_servers()
                 try:
@@ -222,7 +242,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                         manager.handle_client, "127.0.0.1", 0
                     ) as server:
                         port = server.sockets[0].getsockname()[1]
-                        async with bridge.websockets.connect(f"ws://127.0.0.1:{port}") as client:
+                        async with authenticated_connect(f"ws://127.0.0.1:{port}") as client:
                             await client.recv()  # initial "connected" message
                             payload = {
                                 "type": "call_tool",
@@ -283,7 +303,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
                         # A second client must not be answered from the first one's
                         # cached result: the replay guard is per connection.
-                        async with bridge.websockets.connect(f"ws://127.0.0.1:{port}") as other:
+                        async with authenticated_connect(f"ws://127.0.0.1:{port}") as other:
                             await other.recv()  # initial "connected" message
                             await other.send(json.dumps({"id": 7, **payload}))
                             seventh = json.loads(await asyncio.wait_for(other.recv(), 5))
@@ -308,7 +328,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 json.dumps({"mcpServers": {"mock": {"command": sys.executable, "args": [str(mock_path)], "env": {}}}}),
                 encoding="utf-8",
             )
-            manager = bridge.Bridge()
+            manager = bridge.Bridge(auth_token=TEST_TOKEN, trusted_origins=(TEST_ORIGIN,))
             with patch.object(bridge, "CONFIG_PATH", config_path):
                 await manager.start_servers()
                 try:
@@ -323,7 +343,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     mock_server.call_tool = counting_call_tool
                     async with bridge.websockets.serve(manager.handle_client, "127.0.0.1", 0) as server:
                         port = server.sockets[0].getsockname()[1]
-                        async with bridge.websockets.connect(f"ws://127.0.0.1:{port}") as client:
+                        async with authenticated_connect(f"ws://127.0.0.1:{port}") as client:
                             await client.recv()  # initial "connected" message
                             payload = {
                                 "type": "call_tool",
@@ -376,7 +396,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 json.dumps({"mcpServers": {"mock": {"command": sys.executable, "args": [str(mock_path)], "env": {}}}}),
                 encoding="utf-8",
             )
-            manager = bridge.Bridge()
+            manager = bridge.Bridge(auth_token=TEST_TOKEN, trusted_origins=(TEST_ORIGIN,))
             with patch.object(bridge, "CONFIG_PATH", config_path), patch.object(
                 bridge, "TURNLESS_REPLAY_TTL", 0.05
             ):
@@ -393,7 +413,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     mock_server.call_tool = counting_call_tool
                     async with bridge.websockets.serve(manager.handle_client, "127.0.0.1", 0) as server:
                         port = server.sockets[0].getsockname()[1]
-                        async with bridge.websockets.connect(f"ws://127.0.0.1:{port}") as client:
+                        async with authenticated_connect(f"ws://127.0.0.1:{port}") as client:
                             await client.recv()  # initial "connected" message
                             payload = {
                                 "type": "call_tool",
@@ -427,7 +447,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 json.dumps({"mcpServers": {"mock": {"command": sys.executable, "args": [str(mock_path)], "env": {}}}}),
                 encoding="utf-8",
             )
-            manager = bridge.Bridge()
+            manager = bridge.Bridge(auth_token=TEST_TOKEN, trusted_origins=(TEST_ORIGIN,))
             with patch.object(bridge, "CONFIG_PATH", config_path):
                 await manager.start_servers()
                 try:
@@ -449,7 +469,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                             "timeout": 2000,
                             "turn": "convA|1",
                         }
-                        async with bridge.websockets.connect(f"ws://127.0.0.1:{port}") as client:
+                        async with authenticated_connect(f"ws://127.0.0.1:{port}") as client:
                             await client.recv()
                             await client.send(json.dumps({"id": 1, **payload}))
                             first = json.loads(await asyncio.wait_for(client.recv(), 5))
@@ -459,7 +479,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(manager._last_calls, {})
                         self.assertEqual(manager._client_tokens, {})
 
-                        async with bridge.websockets.connect(f"ws://127.0.0.1:{port}") as other:
+                        async with authenticated_connect(f"ws://127.0.0.1:{port}") as other:
                             await other.recv()
                             await other.send(json.dumps({"id": 2, **payload}))
                             second = json.loads(await asyncio.wait_for(other.recv(), 5))
@@ -510,7 +530,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 encoding="utf-8",
             )
-            manager = bridge.Bridge()
+            manager = bridge.Bridge(auth_token=TEST_TOKEN, trusted_origins=(TEST_ORIGIN,))
             with patch.object(bridge, "CONFIG_PATH", config_path):
                 await manager.start_servers()
                 try:
@@ -519,6 +539,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     ) as server:
                         port = server.sockets[0].getsockname()[1]
                         client = await bridge.websockets.connect(f"ws://127.0.0.1:{port}", max_size=None)
+                        await authenticate_test_client(client)
                         try:
                             await client.recv()  # initial "connected" message
                             await client.send(
@@ -674,13 +695,13 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         from aiohttp import ClientSession, web
 
         hub = bridge.EventHub()
-        runner = web.AppRunner(bridge._build_stream_app(hub), access_log=None)
+        runner = web.AppRunner(bridge._build_stream_app(hub, auth_token=TEST_TOKEN), access_log=None)
         await runner.setup()
         site = web.TCPSite(runner, "127.0.0.1", 0)
         await site.start()
         port = site._server.sockets[0].getsockname()[1]
         try:
-            async with ClientSession() as session:
+            async with ClientSession(headers={'Authorization': 'Bearer ' + TEST_TOKEN}) as session:
                 async with session.post(
                     f"http://127.0.0.1:{port}/push", json={"event": "tool_start", "tool": "echo"}
                 ) as response:
@@ -701,11 +722,11 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         hub = bridge.EventHub()
         with patch.object(bridge, "STREAM_PORT", 0):
-            runner = await bridge._start_stream_server(hub)
+            runner = await bridge._start_stream_server(hub, auth_token=TEST_TOKEN)
         try:
             site = next(iter(runner.sites))
             port = site._server.sockets[0].getsockname()[1]
-            async with ClientSession() as session:
+            async with ClientSession(headers={'Authorization': 'Bearer ' + TEST_TOKEN}) as session:
                 async with session.get(f"http://127.0.0.1:{port}/status") as response:
                     self.assertEqual(response.status, 200)
                     status = await response.json()
@@ -751,7 +772,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         first.tools = [{"name": "get_state"}]
         second.tools = [{"name": "get_state"}]
 
-        manager = bridge.Bridge()
+        manager = bridge.Bridge(auth_token=TEST_TOKEN, trusted_origins=(TEST_ORIGIN,))
         manager.servers = {"roblox": first, "effectcraft": second}
         manager._rebuild_catalog()
 
@@ -767,7 +788,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 class OriginGuardTests(unittest.IsolatedAsyncioTestCase):
     @contextlib.asynccontextmanager
     async def _server(self, with_gate: bool = True):
-        manager = bridge.Bridge()
+        manager = bridge.Bridge(auth_token=TEST_TOKEN, trusted_origins=(TEST_ORIGIN,))
         if with_gate:
             server = await bridge._serve_bridge(manager, 0)
             try:
@@ -816,7 +837,7 @@ class OriginGuardTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_serve_bridge_accepts_an_extension_origin(self):
         async with self._server() as port:
-            async with bridge.websockets.connect(
+            async with authenticated_connect(
                 f"ws://127.0.0.1:{port}", origin="chrome-extension://abcdefghijklmnop"
             ) as client:
                 connected = json.loads(await client.recv())
@@ -824,7 +845,7 @@ class OriginGuardTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_serve_bridge_accepts_a_client_without_an_origin(self):
         async with self._server() as port:
-            async with bridge.websockets.connect(f"ws://127.0.0.1:{port}") as client:
+            async with authenticated_connect(f"ws://127.0.0.1:{port}") as client:
                 connected = json.loads(await client.recv())
         self.assertEqual(connected["type"], "connected")
 

@@ -208,6 +208,7 @@
   } catch (error) {
     console.warn("[snapgentV3] Could not load MCP toggles:", error);
   }
+  function isWorkspaceTarget(id = selectedTargetId) { return id === "vscode" || id === "zed"; }
   function isMcpEnabled(id) {
     return mcpEnabled[id] !== false;
   }
@@ -1184,7 +1185,7 @@
         ? servers.map((sv) => {
             const label = sv.id === "vscode"
               ? "VS Code"
-              : sv.id === "roblox" ? "Roblox Studio" : `${sv.id} (addon)`;
+              : sv.id === "zed" ? "Zed" : sv.id === "roblox" ? "Roblox Studio" : `${sv.id} (addon)`;
             return `- ${sv.id}: ${label} - ${sv.alive ? `${sv.tools || 0} commands available` : "offline (no tools)"}`;
           })
         : ["- vscode: VS Code - unknown (bridge did not report server health)"];
@@ -2184,7 +2185,7 @@
   // workspace the model could read). VS Code: the skill files are installed into
   // .snapgent/skills/ (never overwriting) and the model reads them on demand.
   const ANTISLOP_KEY = "zsAntislopEnabled";
-  const ANTISLOP_TARGETS = ["word", "vscode"];
+  const ANTISLOP_TARGETS = ["word", "vscode", "zed"];
   let antislopEnabled = false; // off until the user turns it on
   try {
     chrome.storage.local.get(ANTISLOP_KEY, (r) => { antislopEnabled = !!(r && r[ANTISLOP_KEY]); });
@@ -2200,7 +2201,7 @@
   }
   // Returns { ok:true } or { ok:false, error }. Installing never overwrites an existing skill.
   async function setAntislopEnabled(on) {
-    if (on && selectedTargetId === "vscode") {
+    if (on && isWorkspaceTarget()) {
       const createTool = activeTools().find((t) => bareToolName(t.name) === "create_file");
       if (!createTool) return { ok: false, error: "create_file is not available on this server." };
       await loadWorkspaceSkills();
@@ -2213,7 +2214,7 @@
     }
     antislopEnabled = !!on;
     try { chrome.storage.local.set({ [ANTISLOP_KEY]: antislopEnabled }); } catch {}
-    if (selectedTargetId === "vscode") {
+    if (isWorkspaceTarget()) {
       for (const name of antislopNames()) setSkillEnabled(name, on);
       await loadWorkspaceSkills();
     }
@@ -2531,12 +2532,12 @@
                                // the model makes seconds later)
       if (!alive()) return;
       const selectedTools = activeTools();
-      const vscodeServer = (A.bridge && A.bridge.servers || []).find((server) => server.id === "vscode");
-      if (selectedTargetId === "vscode" && A.bridge && A.bridge.connected &&
+      const vscodeServer = (A.bridge && A.bridge.servers || []).find((server) => server.id === selectedTargetId);
+      if (isWorkspaceTarget() && A.bridge && A.bridge.connected &&
           vscodeServer && vscodeServer.alive &&
           !selectedTools.some((tool) => bareToolName(tool.name) === "list_dir")) {
-        ui.banner("warn", "VS Code workspace required",
-          "Open a project folder in VS Code, then try again.");
+        ui.banner("warn", `${ui.getTargetName()} workspace required`,
+          `Open a project folder in ${ui.getTargetName()}, then try again.`);
         return;
       }
       if (!activeTools().length) {
@@ -2544,11 +2545,11 @@
           `Is the server online?`);
         return;
       }
-      if (selectedTargetId === "vscode") {
+      if (isWorkspaceTarget()) {
         const workspaceTool = activeTools().find((tool) => bareToolName(tool.name) === "list_dir");
         if (!workspaceTool) {
-          ui.banner("warn", "VS Code workspace required",
-            "Open a project folder in VS Code, then try again.");
+          ui.banner("warn", `${ui.getTargetName()} workspace required`,
+            `Open a project folder in ${ui.getTargetName()}, then try again.`);
           return;
         }
         const probe = await bg({
@@ -2559,8 +2560,8 @@
         });
         if (!alive()) return;
         if (!probe || !probe.ok) {
-          ui.banner("warn", "VS Code workspace required",
-            "Open a project folder in VS Code, then try again.");
+          ui.banner("warn", `${ui.getTargetName()} workspace required`,
+            `Open a project folder in ${ui.getTargetName()}, then try again.`);
           return;
         }
       }
@@ -2571,7 +2572,7 @@
           `Try a new chat or reload.`);
         return;
       }
-      if (selectedTargetId === "vscode") await loadWorkspaceSkills();
+      if (isWorkspaceTarget()) await loadWorkspaceSkills();
       if (!alive()) return;
       const prompt = systemPrompt();
       const base = await submitAndGetBase(prompt);
@@ -3539,6 +3540,7 @@
             <select id="zs-target" aria-label="MCP target" hidden tabindex="-1">
               <option value="none">None</option>
               <option value="vscode">VS Code</option>
+              <option value="zed">Zed</option>
               <option value="roblox">Roblox Studio</option>
             </select>
             <button id="zs-target-btn" type="button" aria-haspopup="listbox" aria-label="Choose MCP target"><span id="zs-target-name"></span></button>
@@ -3758,6 +3760,7 @@
       if (id === "none") return "None";
       if (id === "roblox") return "Roblox Studio";
       if (id === "vscode") return "VS Code";
+      if (id === "zed") return "Zed";
       if (id === "effectcraft") return "EffectCraft";
       const server = mergedMcpServers().find((item) => item.id === id);
       return server ? server.name : id;
@@ -3770,10 +3773,11 @@
       const options = [
         { id: "none", name: "None" },
         { id: "vscode", name: "VS Code" },
+        { id: "zed", name: "Zed" },
         { id: "roblox", name: "Roblox Studio" },
         { id: "effectcraft", name: "EffectCraft" },
         ...mergedMcpServers()
-          .filter((server) => !["vscode", "roblox", "effectcraft"].includes(server.id))
+          .filter((server) => !["vscode", "zed", "roblox", "effectcraft"].includes(server.id))
           .map((server) => ({ id: server.id, name: getTargetName(server.id) })),
       ].filter((option) => option.id === "none" || isMcpEnabled(option.id));
       if (!options.some((option) => option.id === id)) {
@@ -3844,6 +3848,7 @@
     function allMcpOptions() {
       const base = [
         { id: "vscode", name: "VS Code" },
+        { id: "zed", name: "Zed" },
         { id: "roblox", name: "Roblox Studio" },
         { id: "effectcraft", name: "EffectCraft" },
       ];
@@ -3987,7 +3992,7 @@
         if (mode !== "list") { renderImport(); return; }
         const rows = allSkills.length
           ? allSkills.map((s) => `<label class="zs-mcp-row"><span class="zs-mcp-row-info"><span class="zs-mcp-row-name">${esc(s.name)}</span><span class="zs-mcp-row-meta">${esc(s.description)}</span></span><input type="checkbox" class="zs-mcp-check" data-name="${esc(s.name)}" ${isSkillEnabled(s.name) ? "checked" : ""}><span class="zs-mcp-toggle"></span></label>`).join("")
-          : `<div class="zs-mcp-pop-note">No skills found in .snapgent/skills/ (VS Code workspace only).</div>`;
+          : `<div class="zs-mcp-pop-note">No skills found in .snapgent/skills/ (VS Code or Zed workspace).</div>`;
         pop.innerHTML =
           `<div class="zs-mcp-pop-card" role="dialog" aria-label="Skills settings">` +
             `<div class="zs-mcp-pop-head"><span>Skills</span><button class="zs-mcp-pop-close" aria-label="Close">&#10005;</button></div>` +
@@ -4018,7 +4023,7 @@
       pop.addEventListener("click", (e) => { if (e.target === pop) pop.remove(); });
       document.documentElement.appendChild(pop);
       render();
-      if (selectedTargetId === "vscode") loadWorkspaceSkills().then(() => { if (pop.isConnected) render(); });
+      if (isWorkspaceTarget()) loadWorkspaceSkills().then(() => { if (pop.isConnected) render(); });
     }
 
     // Skills section of the Switch AI menu: the bundled Antislop row first, then
@@ -4028,10 +4033,10 @@
     function skillsSectionHtml() {
       const esc = (v) => String(v).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
       const bundled = antislopNames();
-      const wsOk = selectedTargetId === "vscode";
+      const wsOk = isWorkspaceTarget();
       const row = (cls, attr, name, meta, checked, dim) =>
         `<label class="zs-mcp-row zs-skill-row${dim ? " zs-skill-dim" : ""}"${dim ? ' title="Not available for this MCP target"' : ""}><span class="zs-mcp-row-info"><span class="zs-mcp-row-name">${esc(name)}</span><span class="zs-mcp-row-meta">${esc(meta)}</span></span><input type="checkbox" class="zs-mcp-check ${cls}" ${attr} ${checked ? "checked" : ""} ${dim ? "disabled" : ""}><span class="zs-mcp-toggle"></span></label>`;
-      let rows = row("zs-antislop-check", "", "Antislop", "Natural writing in Word, no AI-slop code or design in VS Code", antislopEnabled, !antislopApplies());
+      let rows = row("zs-antislop-check", "", "Antislop", "Natural writing in Word, no AI-slop code or design in VS Code or Zed", antislopEnabled, !antislopApplies());
       for (const s of allSkills) {
         if (bundled.includes(s.name)) continue;
         rows += row("zs-skill-check", `data-name="${esc(s.name)}"`, s.name, s.description, isSkillEnabled(s.name), !wsOk);
@@ -4263,21 +4268,21 @@
           actionBtn.title = "Select an MCP target first";
         } else {
           const selectedServer = (A.bridge.servers || []).find((item) => item.id === selectedTargetId);
-          const vscodeWorkspaceMissing = selectedTargetId === "vscode" &&
+          const vscodeWorkspaceMissing = isWorkspaceTarget() &&
             !!A.bridge.connected && !!selectedServer && !!selectedServer.alive &&
             !(selectedServer.tools > 0);
           if (selectedTargetId !== "roblox" &&
-              (!bridgeOk || (selectedTargetId === "vscode" && !workspaceReady))) {
+              (!bridgeOk || (isWorkspaceTarget() && !workspaceReady))) {
             toneClass = "warn"; warn = true;
             msg = !A.bridge.connected
               ? `Run <b>start.bat</b>`
-              : selectedTargetId === "vscode" && (bridgeOk || vscodeWorkspaceMissing)
+              : isWorkspaceTarget() && (bridgeOk || vscodeWorkspaceMissing)
                 ? workspaceProbePending
-                  ? `Checking <b>VS Code workspace</b>…`
-                  : `Open a <b>folder in VS Code</b>`
+                  ? `Checking <b>${targetNameHtml()} workspace</b>…`
+                  : `Open a <b>folder in ${targetNameHtml()}</b>`
                 : `<b>${targetNameHtml()} unavailable</b>`;
             label = `▶︎ Start`; kind = "start"; disabled = true;
-          } else if (bridgeOk && (selectedTargetId !== "vscode" || workspaceReady)) {
+          } else if (bridgeOk && (!isWorkspaceTarget() || workspaceReady)) {
             toneClass = "standby";
             msg = `Ready.`;
             label = `▶︎ Start`; kind = "start";
@@ -4403,7 +4408,7 @@
         const probeFloor = workspaceReady === false && workspaceProbeFails > 0
           ? Math.min(5000 * Math.pow(2, Math.min(workspaceProbeFails, 5)), 300000)
           : 120000;
-        if (selectedTargetId === "vscode" && serverConnected && !workspaceProbePending &&
+        if (isWorkspaceTarget() && serverConnected && !workspaceProbePending &&
             Date.now() - workspaceProbeAt >= probeFloor) {
           workspaceProbeAt = Date.now();
           workspaceProbePending = true;
@@ -4428,14 +4433,14 @@
           }).catch((error) => {
             workspaceReady = false;
             workspaceProbeFails += 1;
-            console.warn("[snapgentV3] Could not verify VS Code workspace:", error);
+            console.warn("[snapgentV3] Could not verify editor workspace:", error);
           }).finally(() => {
             workspaceProbePending = false;
             // Do NOT call renderBar() here: this block runs *inside* renderBar(),
             // so it would recurse and re-arm the probe immediately - one of the
             // causes of the list_dir probe storm.
           });
-        } else if (selectedTargetId === "vscode" && !serverConnected) {
+        } else if (isWorkspaceTarget() && !serverConnected) {
           workspaceReady = false;
         }
         renderBar();

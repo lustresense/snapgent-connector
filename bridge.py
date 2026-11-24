@@ -3,6 +3,7 @@
 
 import asyncio
 import contextlib
+from bridge_security import load_or_create_token, token_matches, trusted_extension, authorized_http, approve_local_action, fresh_nonce, valid_nonce, authentication_proof
 import json
 import logging
 import os
@@ -10,6 +11,7 @@ import re
 import signal
 import socket
 import subprocess
+import tempfile
 import sys
 import time
 from pathlib import Path
@@ -65,6 +67,8 @@ def _origin_allowed(origin: Optional[str]) -> bool:
 def _websocket_origin(websocket: Any) -> Optional[str]:
     request = getattr(websocket, "request", None)
     headers = getattr(request, "headers", None)
+    if headers is None:
+        headers = getattr(websocket, 'request_headers', None)
     if headers is None:
         return None
     try:
@@ -218,6 +222,7 @@ class MCPServer:
     def __init__(self, server_id: str, config: Dict[str, Any]) -> None:
         self.server_id = server_id
         self.config = config
+        self.workspace_lock_file = None
         self.process: Optional[asyncio.subprocess.Process] = None
         self.tools: List[Dict[str, Any]] = []
         self._next_id = 1
@@ -250,13 +255,22 @@ class MCPServer:
                 log(f"[{self.server_id}] {self.error}")
                 return False
 
-            env = os.environ.copy()
+            essential = {'PATH', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT', 'TEMP', 'TMP', 'USERPROFILE', 'HOME', 'APPDATA', 'LOCALAPPDATA', 'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMW6432', 'PROGRAMDATA', 'SYSTEMDRIVE', 'HOMEDRIVE', 'HOMEPATH', 'USERNAME', 'LANG', 'VSCODE_WORKSPACE_PATH', 'VSCODE_WORKSPACE', 'ZS_WORKSPACE', 'ZS_ZED_WORKSPACE', 'ZS_ZED_DB', 'DISPLAY', 'WAYLAND_DISPLAY', 'DBUS_SESSION_BUS_ADDRESS'}
+            inherited = self.config.get('inherit_env', [])
+            if not isinstance(inherited, list) or not all(isinstance(key, str) for key in inherited):
+                self.error = 'inherit_env must be an array of environment variable names.'
+                return False
+            essential.update(key.upper() for key in inherited)
+            env = {key: value for key, value in os.environ.items() if key.upper() in essential or key.upper().startswith(('LC_', 'XDG_'))}
             server_env = self.config.get("env", {})
             if not isinstance(server_env, dict):
                 self.error = "MCP server env must be an object."
                 log(f"[{self.server_id}] {self.error}")
                 return False
             env.update({str(key): str(value) for key, value in server_env.items()})
+            env.pop('ZS_WORKSPACE_LOCK_FILE', None)
+            if self.workspace_lock_file is not None:
+                env['ZS_WORKSPACE_LOCK_FILE'] = str(self.workspace_lock_file)
             try:
                 self.process = await asyncio.create_subprocess_exec(
                     command,
@@ -270,7 +284,7 @@ class MCPServer:
                 )
             except (OSError, ValueError) as error:
                 self.error = str(error)
-                log(f"[{self.server_id}] failed to launch: {self.error}")
+                log(f'[{self.server_id}] failed to launch: {type(error).__name__}')
                 return False
 
             self.tools = []
@@ -457,7 +471,7 @@ class MCPServer:
                     break
                 text = line.decode("utf-8", errors="replace").strip()
                 if text:
-                    log(f"[{self.server_id}] stderr: {text[:MAX_LOG_CHARS]}")
+                    log(f'[{self.server_id}] MCP stderr received ({len(text)} characters)')
         except asyncio.CancelledError:
             raise
 
@@ -551,10 +565,14 @@ class EventHub:
 
 
 class Bridge:
-    def __init__(self) -> None:
+    def __init__(self, auth_token: Optional[str] = None, trusted_origins: Optional[Tuple[str, ...]] = None) -> None:
+        self.auth_token = auth_token if auth_token is not None else load_or_create_token()
+        self.trusted_origins = trusted_origins if trusted_origins is not None else tuple(x.strip() for x in os.environ.get('ZS_TRUSTED_EXTENSION_ORIGINS', '').split(',') if x.strip())
         self.servers: Dict[str, MCPServer] = {}
         self.clients = set()
         self._client_lock = asyncio.Lock()
+        self._admin_lock = asyncio.Lock()
+        self._workspace_locks = tempfile.TemporaryDirectory(prefix='snapgent-workspace-locks-')
         self._catalog: List[Dict[str, Any]] = []
         self._last_studio: Optional[bool] = None
         self.hub = EventHub()
@@ -589,6 +607,9 @@ class Bridge:
             server_id: MCPServer(server_id, server_config)
             for server_id, server_config in config.items()
         }
+        for server_id, server in self.servers.items():
+            if server_id in ('vscode', 'zed'):
+                server.workspace_lock_file = Path(self._workspace_locks.name) / (server_id + '.lock')
         async def _start_one(server: MCPServer) -> None:
             try:
                 await server.start()
@@ -691,6 +712,31 @@ class Bridge:
             except Exception:
                 pass
             return
+        # Authenticate before exposing any server information or accepting RPCs.
+        if origin is not None and not trusted_extension(origin, self.trusted_origins):
+            await websocket.close(code=1008, reason='Untrusted extension')
+            return
+        try:
+            raw_hello = await asyncio.wait_for(websocket.recv(), timeout=5)
+            if len(raw_hello) > 1024:
+                raise ValueError('Invalid authentication frame')
+            hello = json.loads(raw_hello)
+            if not isinstance(hello, dict) or hello.get('type') != 'auth_hello' or not valid_nonce(hello.get('nonce')):
+                raise ValueError('Invalid authentication hello')
+            client_nonce = hello['nonce']
+            server_nonce = fresh_nonce()
+            await websocket.send(_json_line({'type': 'auth_challenge', 'nonce': server_nonce, 'proof': authentication_proof(self.auth_token, 'server', client_nonce, server_nonce)}))
+            raw_auth = await asyncio.wait_for(websocket.recv(), timeout=5)
+            if len(raw_auth) > 1024:
+                raise ValueError('Invalid authentication frame')
+            auth = json.loads(raw_auth)
+            expected = authentication_proof(self.auth_token, 'client', client_nonce, server_nonce)
+            if not isinstance(auth, dict) or auth.get('type') != 'authenticate' or not token_matches(expected, auth.get('proof')):
+                raise ValueError('Authentication failed')
+        except Exception:
+            await websocket.close(code=1008, reason='Authentication required')
+            return
+        await websocket.send(_json_line({'type': 'authenticated', 'nonce': server_nonce}))
         async with self._client_lock:
             self.clients.add(websocket)
         try:
@@ -701,7 +747,7 @@ class Bridge:
             _peer = getattr(websocket, "remote_address", None)
         except Exception:
             _hdr, _peer = {}, None
-        log(f"extension connected path={_path!r} peer={_peer} nclients={len(self.clients)} hdr={_hdr}")
+        log(f'Authenticated local client connected; clients={len(self.clients)}')
         await self._send_client(websocket, self._connected_message())
         pending: set = set()
         limiter = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
@@ -713,7 +759,7 @@ class Bridge:
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
-                    log(f"request handler error: {error}")
+                    log(f'request handler error: {type(error).__name__}')
                     await self._send_client(
                         websocket,
                         {
@@ -809,9 +855,15 @@ class Bridge:
         elif kind == "call_tool":
             await self._call_tool(websocket, request)
         elif kind == "restart_mcp":
+            if not await asyncio.to_thread(approve_local_action, 'Restart MCP servers and release workspace locks', {}):
+                await self._send_client(websocket, {'type': 'mcp_status', 'id': request_id, 'ok': False, 'error': 'Local approval denied'})
+                return
             try:
-                await self.stop_servers()
-                await self.start_servers()
+                async with self._admin_lock:
+                    await self.stop_servers()
+                    for server_id in ('vscode', 'zed'):
+                        (Path(self._workspace_locks.name) / (server_id + '.lock')).unlink(missing_ok=True)
+                    await self.start_servers()
                 response = {
                     "type": "mcp_status",
                     "id": request_id,
@@ -824,10 +876,13 @@ class Bridge:
                 response = {"type": "mcp_status", "id": request_id, "ok": False, "alive": False, "error": str(error)}
             await self._send_client(websocket, response)
             await self.broadcast(self._connected_message())
-        elif kind == "add_server":
-            await self._change_server(websocket, request, remove=False)
-        elif kind == "remove_server":
-            await self._change_server(websocket, request, remove=True)
+        elif kind in ('add_server', 'remove_server'):
+            async with self._admin_lock:
+                details = {key: request.get(key) for key in ('server_id', 'command', 'args', 'env') if key in request}
+                if await asyncio.to_thread(approve_local_action, 'Change MCP executable configuration: ' + kind, details):
+                    await self._change_server(websocket, request, remove=(kind == 'remove_server'))
+                else:
+                    await self._send_client(websocket, {'type': 'server_changed', 'id': request_id, 'ok': False, 'error': 'Local approval denied'})
         elif kind in ("stream", "progress"):
             # Fire-and-forget progress frame (from the extension or any client): relay it
             # to every websocket client and to the HTTP /events subscribers. No reply is
@@ -938,6 +993,13 @@ class Bridge:
                     },
                 )
                 return
+        if server and server.server_id in ('vscode', 'zed') and tool_name in ('run_command', 'run_project_script', 'run_tests', 'git_commit', 'git_add', 'git_diff'):
+            if os.environ.get('ZS_TRUST_TERMINAL_SESSION') != '1':
+                async with self._admin_lock:
+                    approved = await asyncio.to_thread(approve_local_action, 'Execute local workspace operation', {'server': server.server_id, 'tool': tool_name, 'arguments': arguments})
+                if not approved:
+                    await self._send_client(websocket, {'type': 'tool_result', 'id': request_id, 'ok': False, 'kind': 'permission_denied', 'error': 'Local approval denied'})
+                    return
         if not server:
             await self._send_client(
                 websocket,
@@ -996,7 +1058,7 @@ class Bridge:
                     }
             end_ok = not result.get("isError")
             end_extra = {"chars": len(text)}
-            log(f"<- {name} ({text[:120].replace(chr(10), ' ')})")
+            log(f'<- {name} ({len(text)} characters)')
         except (asyncio.TimeoutError, RuntimeError, OSError, ValueError) as error:
             message = str(error)
             end_extra = {"error": message[:200]}
@@ -1010,7 +1072,7 @@ class Bridge:
                     "error": message,
                 },
             )
-            log(f"<- {name} ERROR: {message[:MAX_LOG_CHARS]}")
+            log(f'<- {name} ERROR')
         except asyncio.CancelledError:
             # The client went away mid-call, so there is nobody to answer, but the
             # busy entry must not survive the socket. The `finally` below clears it;
@@ -1031,7 +1093,7 @@ class Bridge:
                     "error": f"Bridge error: {message}",
                 },
             )
-            log(f"<- {name} UNEXPECTED: {message[:MAX_LOG_CHARS]}")
+            log(f'<- {name} UNEXPECTED ERROR')
         finally:
             self.hub.end(call_id, ok=end_ok, **end_extra)
 
@@ -1156,7 +1218,7 @@ def subprocess_run(command: List[str], timeout: int) -> str:
     return result.stdout
 
 
-def _build_stream_app(hub: "EventHub") -> Any:
+def _build_stream_app(hub: "EventHub", auth_token: Optional[str] = None) -> Any:
     """Build the progress app without binding a port.
 
     Kept apart from ``_start_stream_server`` so a test can inspect the route table
@@ -1165,6 +1227,22 @@ def _build_stream_app(hub: "EventHub") -> Any:
     view through a plain POST that skips the CORS preflight.
     """
     from aiohttp import web
+
+    expected = auth_token if auth_token is not None else load_or_create_token()
+
+    @web.middleware
+    async def require_auth(request, handler):
+        if not authorized_http(request.headers.get('Authorization'), expected):
+            return web.Response(status=401, text='Authentication required', headers={'WWW-Authenticate': 'Basic realm="Snapgent", charset="UTF-8"', 'Cache-Control': 'no-store'})
+        if request.headers.get('Sec-Fetch-Site') == 'cross-site':
+            return web.Response(status=403, text='Cross-site request refused')
+        response = await handler(request)
+        if not response.prepared:
+            response.headers['Cache-Control'] = 'no-store'
+            response.headers['X-Content-Type-Options'] = 'nosniff'
+            response.headers['X-Frame-Options'] = 'DENY'
+            response.headers['Referrer-Policy'] = 'no-referrer'
+        return response
 
     async def events(request: Any) -> Any:
         try:
@@ -1197,11 +1275,7 @@ def _build_stream_app(hub: "EventHub") -> Any:
         return response
 
     async def status(request: Any) -> Any:
-        # CORS so the extension popup (chrome-extension:// origin) can poll it.
-        return web.json_response(
-            {"version": BRIDGE_VERSION, **hub.snapshot()},
-            headers={"Access-Control-Allow-Origin": "*"},
-        )
+        return web.json_response({"version": BRIDGE_VERSION, **hub.snapshot()})
 
     async def index(request: Any) -> Any:
         # One-page live view: no build step, no dependency, just what /status and
@@ -1209,7 +1283,7 @@ def _build_stream_app(hub: "EventHub") -> Any:
         # tab instead of tailing JSON in a terminal.
         return web.Response(text=INDEX_HTML, content_type="text/html")
 
-    app = web.Application()
+    app = web.Application(middlewares=[require_auth])
     app.router.add_get("/", index)
     app.router.add_get("/events", events)
     app.router.add_get("/stream", events)
@@ -1217,7 +1291,7 @@ def _build_stream_app(hub: "EventHub") -> Any:
     return app
 
 
-async def _start_stream_server(hub: "EventHub") -> Any:
+async def _start_stream_server(hub: "EventHub", auth_token: Optional[str] = None) -> Any:
     """Plain HTTP side channel so progress can be watched while a call is still running.
 
     GET /events (SSE, also /stream) replays the recent backlog then streams live frames;
@@ -1226,7 +1300,7 @@ async def _start_stream_server(hub: "EventHub") -> Any:
     """
     from aiohttp import web
 
-    runner = web.AppRunner(_build_stream_app(hub), access_log=None)
+    runner = web.AppRunner(_build_stream_app(hub, auth_token), access_log=None)
     await runner.setup()
     site = web.TCPSite(runner, STREAM_HOST, STREAM_PORT)
     await site.start()
@@ -1257,7 +1331,11 @@ async def run() -> None:
             f"'{sys.executable} -m pip install websockets'."
         )
     bridge = Bridge()
-    server = await _serve_bridge(bridge)
+    try:
+        server = await _serve_bridge(bridge)
+    except BaseException:
+        bridge._workspace_locks.cleanup()
+        raise
     listening_msg = f"listening on ws://127.0.0.1:{PORT}"
     try:
         opened = {sock.getsockname()[0] for sock in (server.sockets or [])}
@@ -1269,7 +1347,7 @@ async def run() -> None:
     log(f"{listening_msg} - load the extension and open a supported AI chat")
     stream_runner = None
     try:
-        stream_runner = await _start_stream_server(bridge.hub)
+        stream_runner = await _start_stream_server(bridge.hub, bridge.auth_token)
     except Exception as error:  # never let the side channel stop the bridge
         log(f"progress channel disabled: {type(error).__name__}: {error}")
     loop = asyncio.get_running_loop()
@@ -1299,6 +1377,7 @@ async def run() -> None:
         server.close()
         await server.wait_closed()
         await bridge.stop_servers()
+        bridge._workspace_locks.cleanup()
         log("bridge stopped")
 
 
@@ -1324,7 +1403,10 @@ async def _monitor_servers(bridge: Bridge) -> None:
             if count < 3 or count % 20 == 0:
                 log(f"[{sid}] MCP server disconnected; restarting (attempt {count + 1}).")
             try:
-                ok = await server.start()
+                async with bridge._admin_lock:
+                    if bridge.servers.get(sid) is not server:
+                        continue
+                    ok = await server.start()
             except Exception as error:
                 server.error = str(error)
                 log(f"[{sid}] unexpected restart error: {error}")

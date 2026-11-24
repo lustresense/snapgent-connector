@@ -431,6 +431,11 @@ def main(
             _set_server(servers, "vscode", sys.executable, [str(VSCODE_MCP)])
             print(f"VS Code MCP configured: {VSCODE_MCP}")
 
+        zed_mcp = ROOT / "zed_mcp.py"
+        if zed_mcp.is_file() and "zed" not in servers:
+            _set_server(servers, "zed", sys.executable, [str(zed_mcp)])
+            print(f"Zed MCP configured: {zed_mcp}")
+
         studio_mcp = _roblox_studio_mcp()
         if studio_mcp:
             _set_server(servers, "roblox", str(studio_mcp), [])

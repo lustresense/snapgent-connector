@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = ["app", "crates/bridge", "crates/mcp", "crates/workspace", "crates/security"]
+
+[workspace.package]
+version = "3.9.14"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "process", "io-util", "fs"] }
+axum = { version = "0.8", features = ["ws"] }
+futures-util = "0.3"
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow"] }
+tray-icon = "0.21"
+hmac = "0.12"
+sha2 = "0.10"
+subtle = "2"
+getrandom = "0.3"
+hex = "0.4"
+base64 = "0.22"
+rusqlite = { version = "0.37", features = ["bundled"] }
+regex = "1"
+glob = "0.3"
+url = "2"
+walkdir = "2"
+tempfile = "3"
+tracing = "0.1"
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.dev]
+debug = 1
