@@ -5,7 +5,7 @@ mod paths;
 mod process;
 
 use anyhow::{Result, bail};
-pub use discovery::{Editor, active_workspace};
+pub use discovery::{Editor, active_workspace, workspace_choices};
 use paths::{WorkspacePin, relative, target};
 use serde_json::{Value, json};
 use std::{fs, path::Path, sync::Mutex};
@@ -31,6 +31,9 @@ impl Workspace {
         }
         workspace.fixed_root = Some(root);
         Ok(workspace)
+    }
+    pub fn fixed_root(&self) -> Option<&Path> {
+        self.fixed_root.as_deref()
     }
     pub fn available(&self) -> bool {
         match &self.fixed_root {
@@ -66,11 +69,9 @@ impl Workspace {
             }
             None => active_workspace(self.editor)?,
         };
-        let root = self
-            .pin
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Workspace lock unavailable"))?
-            .pin(&candidate)?;
+        // Serialize operations on this workspace through dispatch.
+        let mut pin = self.pin.lock().map_err(|_| anyhow::anyhow!("Workspace lock unavailable"))?;
+        let root = pin.pin(&candidate)?;
         dispatch(&root, name, args)
     }
 }

@@ -13,6 +13,7 @@ pub const IGNORED: &[&str] = &[
     ".venv",
     "venv",
     "node_modules",
+    "target",
     "__pycache__",
     ".pytest_cache",
     ".mypy_cache",

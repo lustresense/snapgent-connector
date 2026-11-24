@@ -158,6 +158,20 @@ pub async fn handle(state: Arc<State>, session: &mut Session, request: Value) ->
                 }
             }
         }
+        "workspace_list" => {
+            let editor = match request["server"].as_str() {
+                Some("zed") => Some(snapgent_workspace::Editor::Zed),
+                Some("vscode") => Some(snapgent_workspace::Editor::VsCode),
+                _ => None,
+            };
+            match editor {
+                Some(editor) => match tokio::task::spawn_blocking(move || snapgent_workspace::workspace_choices(editor)).await {
+                    Ok(roots) => json!({"type":"tool_result","id":id,"ok":true,"workspaces":roots.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>() }),
+                    Err(e) => error(&id, "tool_error", e),
+                },
+                None => error(&id, "tool_error", "Unknown workspace editor"),
+            }
+        }
         "workspace_bind" => {
             let sid = request["session"].as_str().unwrap_or("");
             let server = request["server"].as_str().unwrap_or("");
@@ -166,36 +180,28 @@ pub async fn handle(state: Arc<State>, session: &mut Session, request: Value) ->
                 "vscode" => Some(snapgent_workspace::Editor::VsCode),
                 _ => None,
             };
+            let requested = request["workspace"].as_str().map(std::path::PathBuf::from);
             if !snapgent_security::valid_nonce(sid) || editor.is_none() {
                 error(&id, "permission_denied", "Invalid workspace binding")
-            } else {
+            } else if let Some(path) = requested {
                 let editor = editor.unwrap();
                 match tokio::task::spawn_blocking(move || {
-                    snapgent_workspace::active_workspace(editor)
-                })
-                .await
-                {
-                    Ok(Ok(root)) => {
-                        if !state
-                            .approvals
-                            .ask(
-                                "Bind agent to workspace",
-                                json!({"server":server,"workspace":root.to_string_lossy()}),
-                                false,
-                            )
-                            .await
-                        {
+                    anyhow::ensure!(path.is_absolute(), "Select an absolute local directory");
+                    snapgent_workspace::Workspace::bound(editor, &path)
+                }).await {
+                    Ok(Ok(workspace)) => {
+                        let root = workspace.fixed_root().expect("bound root").to_path_buf();
+                        if let Some(existing) = state.manager.binding_root(sid, server).await {
+                            if existing == root && workspace.available() {
+                                json!({"type":"tool_result","id":id,"ok":true,"text":root.to_string_lossy()})
+                            } else {
+                                error(&id, "permission_denied", "Session is bound to a different workspace")
+                            }
+                        } else if !state.approvals.ask("Bind agent to workspace", json!({"server":server,"workspace":root.to_string_lossy()}), false).await {
                             error(&id, "permission_denied", "Workspace binding denied")
                         } else {
-                            match snapgent_workspace::Workspace::bound(editor, &root) {
-                                Ok(workspace) => {
-                                    match state.manager.bind_session(sid, server, workspace).await {
-                                        Ok(()) => {
-                                            json!({"type":"tool_result","id":id,"ok":true,"text":root.to_string_lossy()})
-                                        }
-                                        Err(e) => error(&id, "tool_error", e),
-                                    }
-                                }
+                            match state.manager.bind_session(sid, server, workspace).await {
+                                Ok(()) => json!({"type":"tool_result","id":id,"ok":true,"text":root.to_string_lossy()}),
                                 Err(e) => error(&id, "tool_error", e),
                             }
                         }
@@ -203,6 +209,8 @@ pub async fn handle(state: Arc<State>, session: &mut Session, request: Value) ->
                     Ok(Err(e)) => error(&id, "tool_error", e),
                     Err(e) => error(&id, "tool_error", e),
                 }
+            } else {
+                error(&id, "permission_denied", "Select the exact workspace first")
             }
         }
         "workspace_release" => {
@@ -277,12 +285,13 @@ async fn call(state: Arc<State>, session: &mut Session, request: Value) -> Value
         Err(e) => return error(id, "unknown_tool", e),
     };
     if matches!(server.as_str(), "zed" | "vscode") {
-        if let Some(sid) = binding {
-            backend = match state.manager.session_backend(sid, &server).await {
-                Ok(backend) => backend,
-                Err(e) => return error(id, "permission_denied", e),
-            };
-        }
+        let Some(sid) = binding else {
+            return error(id, "workspace_required", "Select a workspace in the Snapgent bar and update the extension if needed.");
+        };
+        backend = match state.manager.session_backend(sid, &server).await {
+            Ok(backend) => backend,
+            Err(e) => return error(id, "workspace_unbound", e),
+        };
     }
     if matches!(server.as_str(), "zed" | "vscode")
         && matches!(

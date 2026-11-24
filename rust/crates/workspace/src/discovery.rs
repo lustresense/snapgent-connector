@@ -166,3 +166,33 @@ pub fn active_workspace(editor: Editor) -> Result<PathBuf> {
         )
     }
 }
+
+/// Recent local folders, not a guarantee that each window is currently open.
+pub fn workspace_choices(editor: Editor) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(path) = active_workspace(editor) {
+        roots.push(path);
+    }
+    if editor == Editor::Zed {
+        if let Some(db) = zed_database() {
+            if let Ok(connection) = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY) {
+                let _ = connection.busy_timeout(Duration::from_millis(250));
+                if let Ok(mut statement) = connection.prepare("SELECT paths FROM workspaces WHERE remote_connection_id IS NULL ORDER BY timestamp DESC, workspace_id DESC LIMIT 40") {
+                    if let Ok(rows) = statement.query_map([], |row| row.get::<_, String>(0)) {
+                        for value in rows.flatten() {
+                            let mut lines = value.lines();
+                            if let Some(line) = lines.next() {
+                                if lines.next().is_none() && PathBuf::from(line).is_absolute() {
+                                    if let Some(path) = directory(line) {
+                                        if !roots.contains(&path) { roots.push(path); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    roots
+}

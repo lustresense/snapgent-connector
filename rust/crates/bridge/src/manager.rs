@@ -26,6 +26,7 @@ pub struct Manager {
     servers: RwLock<BTreeMap<String, Server>>,
     pins: Mutex<HashMap<String, Arc<Workspace>>>,
     session_pins: Mutex<HashMap<(String, String), Arc<Workspace>>>,
+    bound_roots: Mutex<HashMap<PathBuf, std::sync::Weak<Workspace>>>,
     admin: Mutex<()>,
 }
 
@@ -36,6 +37,7 @@ impl Manager {
             servers: RwLock::new(BTreeMap::new()),
             pins: Mutex::new(HashMap::new()),
             session_pins: Mutex::new(HashMap::new()),
+            bound_roots: Mutex::new(HashMap::new()),
             admin: Mutex::new(()),
         }
     }
@@ -184,14 +186,7 @@ impl Manager {
         let mut out = Vec::new();
         for (id, server) in entries {
             let (alive, tools) = match &server.backend {
-                Backend::Builtin(w) => (
-                    true,
-                    if w.available() {
-                        server.tools.clone()
-                    } else {
-                        vec![]
-                    },
-                ),
+                Backend::Builtin(_) => (true, server.tools.clone()),
                 Backend::Stdio(s) => {
                     let alive = s.alive().await;
                     (alive, if alive { server.tools.clone() } else { vec![] })
@@ -230,7 +225,7 @@ impl Manager {
                 catalog.push(json!({"name":name,"server":id,"description":tool.get("description").cloned().unwrap_or(json!("")),"inputSchema":tool.get("inputSchema").cloned().unwrap_or(json!({"type":"object","properties":{}}))}));
             }
         }
-        json!({"type":"connected","bridge_version":"3.9.14","mcp_alive":alive,"tools":catalog,"servers":statuses})
+        json!({"type":"connected","bridge_version":"3.9.14","workspace_binding":true,"mcp_alive":alive,"tools":catalog,"servers":statuses})
     }
     pub async fn bind_session(
         &self,
@@ -243,14 +238,23 @@ impl Manager {
         }
         let mut pins = self.session_pins.lock().await;
         let key = (session.to_owned(), server.to_owned());
-        if pins.contains_key(&key) {
-            bail!("Session already bound; start a new session");
+        if let Some(existing) = pins.get(&key) {
+            if existing.fixed_root() == workspace.fixed_root() && existing.available() { return Ok(()); }
+            bail!("Session bound to a different workspace");
         }
         if pins.len() >= 128 {
             bail!("Workspace session limit reached");
         }
-        pins.insert(key, Arc::new(workspace));
+        let root = workspace.fixed_root().context("Expected an explicitly bound workspace")?.to_path_buf();
+        let mut roots = self.bound_roots.lock().await;
+        roots.retain(|_, weak| weak.strong_count() > 0);
+        let shared = roots.get(&root).and_then(std::sync::Weak::upgrade).unwrap_or_else(|| Arc::new(workspace));
+        roots.insert(root, Arc::downgrade(&shared));
+        pins.insert(key, shared);
         Ok(())
+    }
+    pub async fn binding_root(&self, session: &str, server: &str) -> Option<PathBuf> {
+        self.session_pins.lock().await.get(&(session.to_owned(), server.to_owned())).and_then(|w| w.fixed_root().map(Path::to_path_buf))
     }
     pub async fn session_backend(&self, session: &str, server: &str) -> Result<Backend> {
         if !snapgent_security::valid_nonce(session) {
@@ -259,7 +263,7 @@ impl Manager {
         let pins = self.session_pins.lock().await;
         let workspace = pins
             .get(&(session.to_owned(), server.to_owned()))
-            .context("Workspace session not bound. Start a new agent session.")?;
+            .context("Workspace session not bound. Reapprove the saved workspace.")?;
         Ok(Backend::Builtin(workspace.clone()))
     }
     pub async fn release_session(&self, session: &str) {
