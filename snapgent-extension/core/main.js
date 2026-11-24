@@ -4405,6 +4405,7 @@
         // probe log showed 788 list_dir results (592 of them this exact probe) in
         // six hours, i.e. one probe every 30 s, all of them saying the same thing.
         // Backoff grows after a failure and success resets it to the floor.
+        if (serverConnected && !workspaceReady && !workspaceProbePending && !workspaceProbeFails) workspaceProbeAt = 0;
         const probeFloor = workspaceReady === false && workspaceProbeFails > 0
           ? Math.min(5000 * Math.pow(2, Math.min(workspaceProbeFails, 5)), 300000)
           : 120000;
@@ -4425,6 +4426,7 @@
               type: "call_tool",
               name: workspaceTool.name,
               arguments: { path: "." },
+              server: selectedTargetId,
               timeout: 5000,
             }).then((result) => {
               workspaceReady = !!(result && result.ok);
@@ -4442,6 +4444,8 @@
           });
         } else if (isWorkspaceTarget() && !serverConnected) {
           workspaceReady = false;
+          workspaceProbeAt = 0;
+          workspaceProbeFails = 0;
         }
         renderBar();
         refreshSetup(s.connected);

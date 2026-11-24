@@ -11,7 +11,7 @@
       --border: rgba(255, 255, 255, 0.08);
       --text: #e8e8ec;
       --muted: rgba(232, 232, 236, 0.6);
-      --accent: #7c8cff;
+      --accent: #22d3ee;
       --ok: #3ddc97;
       --warn: #ffb454;
       --bad: #ff6b6b;
@@ -182,6 +182,12 @@
       <div id="servers"></div>
     </section>
 
+    <section class="card">
+      <label for="pair-token">Local bridge pairing</label>
+      <input id="pair-token" type="password" autocomplete="off" spellcheck="false" placeholder="Local credential (optional)" style="width:100%;margin:8px 0;padding:8px;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:6px" />
+      <button id="pair">Pair bridge</button>
+      <p id="pair-result" class="hint" role="status"></p>
+    </section>
     <div class="actions">
       <button class="ghost" id="reconnect">↻ Reconnect</button>
       <button class="ghost" id="restart">⟳ Restart</button>

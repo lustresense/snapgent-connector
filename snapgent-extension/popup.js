@@ -24,17 +24,28 @@ function render(s) {
     ? (ok ? "Connected"
         : studioOff ? "No Studio"
         : "Open Studio")
-    : "Bridge offline";
+    : s.connectionState === "pairing_required" ? "Pairing required" : s.connectionState === "authenticating" ? "Authenticating…" : s.connectionState === "connecting" ? "Connecting…" : "Bridge offline";
   const ver = document.getElementById("ver");
   const extVer = chrome.runtime.getManifest().version;
   ver.textContent = !s.connected ? `ext v${extVer}`
     : s.bridgeVersion ? `ext v${extVer} · bridge v${s.bridgeVersion}`
     : `ext v${extVer} · bridge old`;
-  tools.textContent = s.connected ? `${s.tools || 0} tools` : "Run start.bat";
+  tools.textContent = s.connected ? `${s.tools || 0} tools` : s.connectionError || "Start the local Snapgent bridge";
   servers.textContent = s.connected
     ? list.map((x) => `${x.alive ? "●" : "○"} ${x.id} (${x.alive ? x.tools + " tools" : "down"})`).join("\n")
     : "";
 }
+
+document.getElementById("pair").addEventListener("click", () => {
+  const input = document.getElementById("pair-token");
+  const result = document.getElementById("pair-result");
+  const token = input.value.trim(); input.value = "";
+  result.textContent = "Pairing…";
+  chrome.runtime.sendMessage({type:"pair_bridge", token}, (r) => {
+    result.textContent = chrome.runtime.lastError ? "Extension unavailable" : r && r.ok ? "Credential saved. Authenticating…" : (r && r.error) || "Pairing failed";
+    refresh();
+  });
+});
 
 function refresh() {
   chrome.runtime.sendMessage({ type: "status" }, (s) => s && render(s));

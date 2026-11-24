@@ -82,6 +82,9 @@ const CONNECT_WAIT_MS = 2500;
 
 let ws = null;
 let connected = false;
+let connectionState = "offline";
+let connectionError = "";
+let credentialRevision = 0;
 let reconnectDelay = RECONNECT_MIN;
 let reconnectTimer = null;
 let heartbeatTimer = null;
@@ -113,49 +116,159 @@ function log(...a) {
   console.log("[zs-bg]", ...a);
 }
 
+// The token is kept in extension-origin IndexedDB, never content-script storage.
+const validCredential = (value) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+function credentialStore(mode, value) {
+  return new Promise((resolve, reject) => {
+    const open = indexedDB.open("snapgent-credentials", 1);
+    open.onupgradeneeded = () => open.result.createObjectStore("private");
+    open.onerror = () => reject(new Error("Credential storage unavailable"));
+    open.onsuccess = () => {
+      const db = open.result;
+      try {
+        const tx = db.transaction("private", mode);
+        const store = tx.objectStore("private");
+        const req = mode === "readonly" ? store.get("bridge") : store.put(value, "bridge");
+        tx.oncomplete = () => { db.close(); resolve(req.result); };
+        tx.onabort = tx.onerror = () => { db.close(); reject(new Error("Credential storage failed")); };
+      } catch (e) { db.close(); reject(e); }
+    };
+  });
+}
+function nativeCredential() {
+  return new Promise((resolve) => {
+    if (!chrome.runtime.sendNativeMessage) return resolve(null);
+    const timer = setTimeout(() => resolve(null), 2500);
+    try {
+      chrome.runtime.sendNativeMessage("local.snapgent.pairing", { type: "pair" }, (reply) => {
+        clearTimeout(timer);
+        if (chrome.runtime.lastError) return resolve(null);
+        resolve(reply && reply.ok && validCredential(reply.token) ? reply.token : null);
+      });
+    } catch { clearTimeout(timer); resolve(null); }
+  });
+}
+async function getCredential() {
+  const cached = await credentialStore("readonly");
+  if (validCredential(cached)) return cached;
+  const value = await nativeCredential();
+  if (validCredential(value)) {
+    await credentialStore("readwrite", value);
+    return value;
+  }
+  return null;
+}
+const hex = (bytes) => Array.from(bytes, x => x.toString(16).padStart(2, "0")).join("");
+const unhex = (value) => Uint8Array.from(value.match(/../g), x => parseInt(x, 16));
+async function authKey(token) {
+  return crypto.subtle.importKey("raw", unhex(token), { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
+}
+function authPayload(role, client, server) {
+  return new TextEncoder().encode("snapgent-auth-v1:" + role + ":" + client + ":" + server);
+}
+function popupSender(sender) {
+  return !!sender && sender.id === chrome.runtime.id &&
+    sender.url === chrome.runtime.getURL("popup.html") && !sender.tab;
+}
 // ── WebSocket lifecycle ─────────────────────────────────────────────────
 function connect() {
-  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
-    return;
-  }
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
   clearTimeout(reconnectTimer);
   const targetUrl = URLS[currentUrlIndex % URLS.length];
-  try {
-    ws = new WebSocket(targetUrl);
-  } catch (e) {
-    log("WebSocket ctor failed for " + targetUrl, e);
+  let socket;
+  try { socket = new WebSocket(targetUrl); }
+  catch {
+    connectionState = "offline";
     currentUrlIndex++;
     scheduleReconnect();
     return;
   }
-
-  ws.onopen = () => {
-    connected = true;
-    reconnectDelay = RECONNECT_MIN;
-    lastMessageAt = Date.now();
-    log("connected to bridge at " + targetUrl);
-    startHeartbeat();
+  ws = socket;
+  connected = false;
+  connectionState = "connecting";
+  const revision = credentialRevision;
+  let stage = "opening", key, clientNonce, serverNonce;
+  const current = () => ws === socket && credentialRevision === revision && socket.readyState === WebSocket.OPEN;
+  const fail = (reason) => {
+    if (ws !== socket) return;
+    connectionState = "pairing_required";
+    connectionError = reason;
     broadcastStatus();
+    try { socket.close(); } catch {}
   };
-
-  ws.onmessage = (ev) => {
-    lastMessageAt = Date.now();
-    let msg;
+  const deadline = setTimeout(() => {
+    if (ws !== socket || connected) return;
+    if (stage === "opening") { try { socket.close(); } catch {} }
+    else fail("Authentication timed out. Check bridge and pairing.");
+  }, 11000);
+  socket.onopen = async () => {
+    if (!current()) return;
+    connectionState = "authenticating";
+    broadcastStatus();
     try {
-      msg = JSON.parse(ev.data);
-    } catch {
-      return;
-    }
-    handleBridgeMessage(msg);
+      const token = await getCredential();
+      if (!current()) return;
+      if (!token) return fail("Pair Snapgent with the local bridge in the extension popup.");
+      key = await authKey(token);
+      if (!current()) return;
+      clientNonce = hex(crypto.getRandomValues(new Uint8Array(32)));
+      stage = "challenge";
+      socket.send(JSON.stringify({ type: "auth_hello", nonce: clientNonce }));
+    } catch { if (current()) fail("Could not load local pairing credential."); }
   };
-
-  ws.onclose = () => {
+  socket.onmessage = async (ev) => {
+    if (!current()) return;
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+    if (!msg || typeof msg !== "object") return;
+    lastMessageAt = Date.now();
+    if (stage === "ready") { handleBridgeMessage(msg); return; }
+    try {
+      if (stage === "challenge" && msg.type === "auth_challenge" &&
+          validCredential(msg.nonce) && validCredential(msg.proof)) {
+        stage = "verifying";
+        serverNonce = msg.nonce;
+        const verified = await crypto.subtle.verify("HMAC", key, unhex(msg.proof),
+          authPayload("server", clientNonce, serverNonce));
+        if (!current()) return;
+        if (!verified) return fail("Bridge identity verification failed. Pair again.");
+        const proof = hex(new Uint8Array(await crypto.subtle.sign("HMAC", key,
+          authPayload("client", clientNonce, serverNonce))));
+        if (!current()) return;
+        stage = "confirm";
+        socket.send(JSON.stringify({ type: "authenticate", proof }));
+      } else if (stage === "confirm" && msg.type === "authenticated" && msg.nonce === serverNonce) {
+        stage = "ready";
+        clearTimeout(deadline);
+        connected = true;
+        connectionState = "connected";
+        connectionError = "";
+        reconnectDelay = RECONNECT_MIN;
+        startHeartbeat();
+        broadcastStatus();
+      } else {
+        fail("Incompatible bridge or invalid authentication response.");
+      }
+    } catch { if (current()) fail("Bridge authentication failed."); }
+  };
+  socket.onclose = () => {
+    clearTimeout(deadline);
+    if (ws !== socket) return;
+    ws = null;
     connected = false;
+    if (stage !== "opening" && stage !== "ready" && connectionState !== "pairing_required") {
+      connectionState = "pairing_required";
+      connectionError = "Bridge rejected pairing. Check trusted extension ID and credential.";
+    } else if (connectionState !== "pairing_required") {
+      connectionState = "offline";
+      connectionError = "";
+    }
     mcpAlive = false;
     studioConnected = null;
     studioApp = null;
     studioProc = null;
     serversCache = [];
+    toolsCache = [];
     bridgeVersion = null;
     stopHeartbeat();
     failAllPending("bridge connection closed");
@@ -163,16 +276,12 @@ function connect() {
     currentUrlIndex++;
     scheduleReconnect();
   };
-
-  ws.onerror = (e) => {
-    log("WebSocket error on " + targetUrl, e);
-    try { ws.close(); } catch {}
-  };
+  socket.onerror = () => { if (ws === socket) { try { socket.close(); } catch {} } };
 }
 
 function scheduleReconnect() {
   clearTimeout(reconnectTimer);
-  reconnectTimer = setTimeout(connect, reconnectDelay);
+  reconnectTimer = setTimeout(connect, connectionState === "pairing_required" ? 10000 : reconnectDelay);
   reconnectDelay = Math.min(reconnectDelay * 1.7, RECONNECT_MAX);
 }
 
@@ -180,6 +289,7 @@ function startHeartbeat() {
   stopHeartbeat();
   heartbeatTimer = setInterval(async () => {
     if (connected) {
+      const heartbeatSocket = ws;
       // Half-open socket: the WS still reports OPEN but nothing comes through.
       //
       // STALENESS IS PROVED, NOT GUESSED. Chrome suspends an idle MV3 service
@@ -200,6 +310,7 @@ function startHeartbeat() {
       });
       if (decision.shouldProbe) {
         const pong = await send({ type: "ping" }, 4000).catch(() => null);
+        if (ws !== heartbeatSocket || !connected) return;
         const answered = !!(pong && pong.ok);
         const final = ZSGuard.heartbeatDecision({
           now: Date.now(),
@@ -271,7 +382,7 @@ async function send(obj, timeout = REQUEST_TIMEOUT_DEFAULT) {
     const timer = setTimeout(() => {
       if (pending.has(id)) {
         pending.delete(id);
-        resolve({ ok: false, kind: "timeout", error: "bridge did not respond in time" });
+        resolve({ ok: false, kind: "timeout", sent: true, error: "bridge did not respond in time" });
       }
     }, effectiveTimeout);
     pending.set(id, { resolve, timer, sent: false });
@@ -405,7 +516,7 @@ function failAllPending(reason) {
 
 // ── status push to any open DeepSeek tab + popup ─────────────────────────
 function statusObj() {
-  return { type: "zs-status", connected, mcpAlive, bridgeVersion, studio: studioConnected, studioApp, studioProc, tools: toolsCache.length, servers: serversCache };
+  return { type: "zs-status", connected, connectionState, connectionError, mcpAlive, bridgeVersion, studio: studioConnected, studioApp, studioProc, tools: toolsCache.length, servers: serversCache };
 }
 
 function broadcastStatus() {
@@ -441,6 +552,22 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       // bridge is down" even though it is perfectly healthy (measured: ping
       // 1 ms, 28 tools listed). Keeping the case here makes the answer
       // truthful: ok only when the bridge actually returned a pong.
+      case "pair_bridge": {
+        if (!popupSender(_sender)) { sendResponse({ok:false,error:"Pairing is restricted to the extension popup."}); break; }
+        try {
+          const token = typeof msg.token === "string" && msg.token.trim() ? msg.token.trim() : await nativeCredential();
+          if (!validCredential(token)) { sendResponse({ok:false,error:"Enable automatic pairing in Snapgent, or enter the 64-character local credential."}); break; }
+          await credentialStore("readwrite", token);
+          credentialRevision++;
+          connectionState = "offline"; connectionError = "";
+          const old = ws;
+          ws = null; connected = false; stopHeartbeat(); failAllPending("Pairing changed");
+          if (old) { try { old.close(); } catch {} }
+          reconnectDelay = RECONNECT_MIN; currentUrlIndex = 0; connect();
+          sendResponse({ok:true});
+        } catch { sendResponse({ok:false,error:"Unable to save local pairing credential."}); }
+        break;
+      }
       case "ping":
         send({ type: "ping" }, FAST_TIMEOUT).then((r) => {
           sendResponse(r && r.ok

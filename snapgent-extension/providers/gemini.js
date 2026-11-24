@@ -35,7 +35,7 @@ const ZSProvider = (() => {
     reply: "message-content",
     thinking: "model-thoughts",
     editor: ".ql-editor[contenteditable='true']",
-    inputArea: "input-area-v2",
+    inputArea: "input-area-v2, input-area",
     codeWrap: "code-block",
     errorSurfaces: 'mat-snack-bar-container,[role="alert"],[class*="error-message"]',
   };
@@ -122,9 +122,9 @@ const ZSProvider = (() => {
   // the send hooks intact (otherwise our own textarea would defeat it and the
   // hooks could swallow the site's login button).
   const getEditor = () => {
-    for (const sel of [S.editor, ".ql-editor"]) {
+    for (const sel of [S.editor, ".ql-editor", "rich-textarea [contenteditable]", "input-area-v2 [role=\"textbox\"]", "input-area [role=\"textbox\"]"]) {
       for (const e of document.querySelectorAll(sel)) {
-        if (!e.closest("#zs-root")) return e;
+        if (!e.closest("#zs-root, #zs-bar, user-query, model-response")) return e;
       }
     }
     return null;
@@ -151,7 +151,10 @@ const ZSProvider = (() => {
   const isFreshChat = () => chatIsEmpty() && !!getEditor();
 
   // The composer box the Start gate hides as one unit.
-  const composerFrame = () => document.querySelector(S.inputArea);
+  const composerFrame = () => {
+    const ed = getEditor();
+    return (ed && (ed.closest(S.inputArea) || ed.closest("rich-textarea"))) || document.querySelector(S.inputArea);
+  };
 
   // Where the core mounts its in-flow status bar. The <input-area-v2> composer
   // sits inside a flex-COLUMN <fieldset.input-area-container>, so inserting the
@@ -185,7 +188,7 @@ const ZSProvider = (() => {
     return i ? (i.getAttribute("fonticon") || i.getAttribute("data-mat-icon-name") || (i.textContent || "").trim()) : "";
   };
   function actionButtons() {
-    const box = document.querySelector(S.inputArea);
+    const box = composerFrame();
     return box ? [...box.querySelectorAll("button")].filter((b) => b.offsetParent !== null) : [];
   }
   const findButtonByIcon = (name) => actionButtons().find((b) => iconName(b) === name) || null;
@@ -423,7 +426,7 @@ const ZSProvider = (() => {
       // already there, and only attach if nothing is pending yet.
       if (editorText() !== text) await setEditorText(ed, text);
       const hasPendingAttachment = () => {
-        const box = document.querySelector(S.inputArea);
+        const box = composerFrame();
         return !!(box && box.querySelector("[class*='preview'], [class*='thumbnail']"));
       };
       if (images && images.length && !hasPendingAttachment()) {
@@ -515,7 +518,7 @@ const ZSProvider = (() => {
     // live: the message went out text-only and the file sat in the composer,
     // unsent, indefinitely - even though the preview had long since appeared).
     const previewOk = await waitFor(() => {
-      const box = document.querySelector(S.inputArea);
+      const box = composerFrame();
       return !!(box && box.querySelector("img, [class*='preview'], [class*='thumbnail']"));
     }, 15000);
     diag("attach.previewOk", { previewOk });
@@ -528,7 +531,7 @@ const ZSProvider = (() => {
     // is present ~2-4s (grows with file size), then removed on completion.
     const spinnerSel = 'mat-spinner, mat-progress-spinner, progress, [role="progressbar"]';
     const hasSpinner = () => {
-      const box = document.querySelector(S.inputArea);
+      const box = composerFrame();
       return !!(box && box.querySelector(spinnerSel));
     };
     // The preview wrapper and the spinner mount in the SAME Angular render, so a
@@ -542,7 +545,7 @@ const ZSProvider = (() => {
   }
   function clearAttachments() {
     try {
-      const box = document.querySelector(S.inputArea);
+      const box = composerFrame();
       if (!box) return;
       box.querySelectorAll("[aria-label*='upprimer'], [aria-label*='emove'], [class*='delete'], [class*='remove']")
         .forEach((d) => { try { d.click(); } catch {} });
@@ -583,7 +586,8 @@ const ZSProvider = (() => {
       "click",
       (e) => {
         if (!getEditor()) return;
-        const btn = e.target && e.target.closest && e.target.closest(`${S.inputArea} button`);
+        const btn = e.target && e.target.closest && e.target.closest("button");
+        if (!btn || !composerFrame()?.contains(btn)) return;
         if (!btn) return;
         const ic = iconName(btn);
         if (ic === "stop") {
