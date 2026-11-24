@@ -455,7 +455,7 @@
       };
       let tries = 0;
       let messageSent = false;
-      const maxTries = 8;
+      const maxTries = 12;
       let possibleSubmission = false;
       while (!messageSent && !landed() && tries < maxTries && stillCurrent()) {
         if (document.hidden) {
@@ -532,7 +532,7 @@
       // themselves instead of watching a stuck bar.
       if (!messageSent && !landed() && stillCurrent()) {
         diag("send.failed", { tries });
-        throw new Error("Automatic submission failed after " + tries + " attempts. Check the provider connection or send the pending composer message manually.");
+        throw new Error("Provider did not accept the pending message after " + tries + " automatic attempts. Draft preserved; check provider availability.");
       }
       return base;
     } finally {

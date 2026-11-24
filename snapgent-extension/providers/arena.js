@@ -522,7 +522,27 @@ const ZSProvider = (() => {
       diag("arena.tas.skipAttach", { reason: !images || !images.length ? "no-images" : "same-set", imgId: images ? images.__zsId : null });
     }
     if (!canSend() || !sendReady() || !editorText().trim()) return false;
-    sendButton().click();
+    const button = sendButton();
+    if (!button || button.isConnected === false || !canSend()) return false;
+    if (attempt % 3 === 1) {
+      const target = getEditor() || editor;
+      const readonly = target.hasAttribute("readonly");
+      const editable = target.getAttribute("contenteditable");
+      try {
+        if (readonly) target.removeAttribute("readonly");
+        if (editable === "false") target.setAttribute("contenteditable", "true");
+        target.focus();
+        if (!canSend()) return false;
+        const key = {key:"Enter",code:"Enter",keyCode:13,which:13,bubbles:true,cancelable:true,composed:true};
+        target.dispatchEvent(new KeyboardEvent("keydown",key));
+        target.dispatchEvent(new KeyboardEvent("keyup",key));
+      } finally {
+        if (readonly && target.getAttribute("readonly") === null && getEditor() === target) target.setAttribute("readonly","");
+        if (editable === "false" && target.getAttribute("contenteditable") === "true" && getEditor() === target) target.setAttribute("contenteditable","false");
+      }
+    } else if (attempt % 3 === 2 && button.type === "submit" && button.form && typeof button.form.requestSubmit === "function") {
+      button.form.requestSubmit(button);
+    } else button.click();
     const sent = await waitFor(() => !canSend() || !editorText().trim() || isHardGenerating(), 5000);
     diag("arena.tas.sent", { sent, editorLen: editorText().length, pendingAfterSend: pendingCount() });
     return true;

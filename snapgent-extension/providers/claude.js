@@ -246,7 +246,26 @@ const ZSProvider = (() => {
     await waitFor(() => !canSend() || ready(), 10000);
     if (!canSend() || !ready() || !sameDraft() || !editorText().trim() || userCount() > beforeUsers) return false;
     const button = sendButton();
-    button.click();
+    if (!button || button.isConnected === false || !canSend()) return false;
+    if (attempt % 3 === 1) {
+      const target = getEditor() || editor;
+      const readonly = target.hasAttribute("readonly");
+      const editable = target.getAttribute("contenteditable");
+      try {
+        if (readonly) target.removeAttribute("readonly");
+        if (editable === "false") target.setAttribute("contenteditable", "true");
+        target.focus();
+        if (!canSend()) return false;
+        const key = {key:"Enter",code:"Enter",keyCode:13,which:13,bubbles:true,cancelable:true,composed:true};
+        target.dispatchEvent(new KeyboardEvent("keydown",key));
+        target.dispatchEvent(new KeyboardEvent("keyup",key));
+      } finally {
+        if (readonly && target.getAttribute("readonly") === null && getEditor() === target) target.setAttribute("readonly","");
+        if (editable === "false" && target.getAttribute("contenteditable") === "true" && getEditor() === target) target.setAttribute("contenteditable","false");
+      }
+    } else if (attempt % 3 === 2 && button.type === "submit" && button.form && typeof button.form.requestSubmit === "function") {
+      button.form.requestSubmit(button);
+    } else button.click();
     await waitFor(() => !canSend() || editorText().trim() === "" || userCount() > beforeUsers || isHardGenerating(), 5000);
     return true;
   }

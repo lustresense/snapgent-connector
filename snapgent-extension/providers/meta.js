@@ -621,16 +621,17 @@ const ZSProvider = (() => {
     const b = sendButton();
 
     // Primary submission path: click the send button once
-    if (b && canSend()) {
+    if (b && canSend() && attempt % 3 !== 1) {
       if (typeof b.focus === "function") b.focus();
       try {
         attempted = true;
-        b.click();
+        if (attempt % 3 === 2 && b.type === "submit" && b.form && typeof b.form.requestSubmit === "function") b.form.requestSubmit(b);
+        else b.click();
         clickSucceeded = true;
       } catch {}
     }
 
-    // Fallback path: only if clicking the send button is known to have failed (e.g. absent or threw)
+    // Keyboard fallback on a later retry, after the core verified that the draft remains.
     if (!clickSucceeded && canSend()) {
       const edTarget = visEd || targetEditor;
       if (edTarget) {
@@ -644,7 +645,7 @@ const ZSProvider = (() => {
     }
 
     const sent = await waitFor(() => !canSend() || isSubmitted(), 10000);
-    if (sent) _attachedImages = null;
+    if (isSubmitted()) _attachedImages = null;
     diag("meta.tas.sent", {
       sent,
       editorLen: editorText().length,
