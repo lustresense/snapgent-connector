@@ -70,7 +70,10 @@ impl Workspace {
             None => active_workspace(self.editor)?,
         };
         // Serialize operations on this workspace through dispatch.
-        let mut pin = self.pin.lock().map_err(|_| anyhow::anyhow!("Workspace lock unavailable"))?;
+        let mut pin = self
+            .pin
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Workspace lock unavailable"))?;
         let root = pin.pin(&candidate)?;
         dispatch(&root, name, args)
     }

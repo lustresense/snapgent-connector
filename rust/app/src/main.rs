@@ -56,7 +56,7 @@ impl Desktop {
         } else {
             Page::Overview
         };
-        Self {
+        let mut desktop = Self {
             settings,
             runtime: tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
@@ -77,7 +77,18 @@ impl Desktop {
             tray: tray::Tray::new().ok(),
             quitting: false,
             hidden: false,
+        };
+        if desktop
+            .settings
+            .as_ref()
+            .is_some_and(|s| Settings::valid_id(&s.extension_id))
+        {
+            if let Some(s) = desktop.settings.as_ref() {
+                let _ = pairing::register(s);
+            }
+            desktop.start(&cc.egui_ctx);
         }
+        desktop
     }
     fn status(&self) -> String {
         self.running.lock().map(|s| s.clone()).unwrap_or_default()
@@ -717,6 +728,81 @@ fn main() -> eframe::Result<()> {
     {
         if pairing::native_request(&origin).is_err() {
             std::process::exit(1);
+        }
+        return Ok(());
+    }
+    if std::env::args().any(|a| a == "--headless" || a == "--bridge" || a == "--serve") {
+        use std::io::Write;
+        let settings = Settings::load().map_err(|e| eframe::Error::AppCreation(e.into()))?;
+        let _ = pairing::register(&settings);
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .map_err(|e| eframe::Error::AppCreation(e.into()))?;
+        let state = snapgent_bridge::State::new(
+            settings.root.clone(),
+            settings.token.clone(),
+            settings.origins(),
+        )
+        .map_err(|e| eframe::Error::AppCreation(e.into()))?;
+        let _ = writeln!(
+            std::io::stdout(),
+            "Snapgent bridge listening on 17613/17614..."
+        );
+        let log_root = settings.root.clone();
+        let log_state = state.clone();
+        rt.spawn(async move {
+            let (_, mut events) = log_state.events.subscribe(0);
+            let folder = log_root.join("logs");
+            let _ = std::fs::create_dir_all(&folder);
+            while let Ok(event) = events.recv().await {
+                if event["source"] == "client" {
+                    continue;
+                }
+                let kind = event["event"].as_str().unwrap_or("");
+                let line = match kind {
+                    "log" => event["message"].as_str().unwrap_or("").to_owned(),
+                    "tool_start" => format!(
+                        "START  {}  {}",
+                        event["server"].as_str().unwrap_or(""),
+                        event["tool"].as_str().unwrap_or("")
+                    ),
+                    "tool_end" => format!(
+                        "{}  {}  {} ms",
+                        if event["ok"] == true { "DONE" } else { "ERR" },
+                        event["tool"].as_str().unwrap_or(""),
+                        event["duration_ms"].as_u64().unwrap_or(0)
+                    ),
+                    _ => continue,
+                };
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs_f64();
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(folder.join("native-bridge.log"))
+                {
+                    let _ = writeln!(file, "{:.3} {line}", now);
+                }
+            }
+        });
+        if std::env::args().any(|a| a == "--auto-approve" || a == "--trust") {
+            let app_state = state.clone();
+            rt.spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    if let Some(appr) = app_state.approvals.take() {
+                        appr.respond(true);
+                    }
+                }
+            });
+        }
+        let outcome = rt.block_on(async { state.run(17613, 17614).await });
+        if let Err(e) = outcome {
+            let _ = writeln!(std::io::stderr(), "Bridge error: {e}");
         }
         return Ok(());
     }

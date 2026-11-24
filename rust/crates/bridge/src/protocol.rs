@@ -165,8 +165,14 @@ pub async fn handle(state: Arc<State>, session: &mut Session, request: Value) ->
                 _ => None,
             };
             match editor {
-                Some(editor) => match tokio::task::spawn_blocking(move || snapgent_workspace::workspace_choices(editor)).await {
-                    Ok(roots) => json!({"type":"tool_result","id":id,"ok":true,"workspaces":roots.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>() }),
+                Some(editor) => match tokio::task::spawn_blocking(move || {
+                    snapgent_workspace::workspace_choices(editor)
+                })
+                .await
+                {
+                    Ok(roots) => {
+                        json!({"type":"tool_result","id":id,"ok":true,"workspaces":roots.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>() })
+                    }
                     Err(e) => error(&id, "tool_error", e),
                 },
                 None => error(&id, "tool_error", "Unknown workspace editor"),
@@ -188,20 +194,36 @@ pub async fn handle(state: Arc<State>, session: &mut Session, request: Value) ->
                 match tokio::task::spawn_blocking(move || {
                     anyhow::ensure!(path.is_absolute(), "Select an absolute local directory");
                     snapgent_workspace::Workspace::bound(editor, &path)
-                }).await {
+                })
+                .await
+                {
                     Ok(Ok(workspace)) => {
                         let root = workspace.fixed_root().expect("bound root").to_path_buf();
                         if let Some(existing) = state.manager.binding_root(sid, server).await {
                             if existing == root && workspace.available() {
                                 json!({"type":"tool_result","id":id,"ok":true,"text":root.to_string_lossy()})
                             } else {
-                                error(&id, "permission_denied", "Session is bound to a different workspace")
+                                error(
+                                    &id,
+                                    "permission_denied",
+                                    "Session is bound to a different workspace",
+                                )
                             }
-                        } else if !state.approvals.ask("Bind agent to workspace", json!({"server":server,"workspace":root.to_string_lossy()}), false).await {
+                        } else if !state
+                            .approvals
+                            .ask(
+                                "Bind agent to workspace",
+                                json!({"server":server,"workspace":root.to_string_lossy()}),
+                                false,
+                            )
+                            .await
+                        {
                             error(&id, "permission_denied", "Workspace binding denied")
                         } else {
                             match state.manager.bind_session(sid, server, workspace).await {
-                                Ok(()) => json!({"type":"tool_result","id":id,"ok":true,"text":root.to_string_lossy()}),
+                                Ok(()) => {
+                                    json!({"type":"tool_result","id":id,"ok":true,"text":root.to_string_lossy()})
+                                }
                                 Err(e) => error(&id, "tool_error", e),
                             }
                         }
@@ -286,7 +308,11 @@ async fn call(state: Arc<State>, session: &mut Session, request: Value) -> Value
     };
     if matches!(server.as_str(), "zed" | "vscode") {
         let Some(sid) = binding else {
-            return error(id, "workspace_required", "Select a workspace in the Snapgent bar and update the extension if needed.");
+            return error(
+                id,
+                "workspace_required",
+                "Select a workspace in the Snapgent bar and update the extension if needed.",
+            );
         };
         backend = match state.manager.session_backend(sid, &server).await {
             Ok(backend) => backend,

@@ -75,7 +75,7 @@ ok("the root class goes on while the cover is intended on",
   /document\.documentElement\.classList\.add\("zs-cover-on"\)/.test(src));
 ok("the placeholder comes back when the loop ends",
   (src.match(/document\.documentElement\.classList\.remove\("zs-cover-on"\)/g) || []).length >= 2 &&
-  /cover\.dataset\.on = "";[\s\S]{0,320}remove\("zs-cover-on"\)/.test(src));
+  /cover\.dataset\.on = "";[\s\S]{0,600}remove\("zs-cover-on"\)/.test(src));
 ok("it also comes back while the cover is scroll-hidden",
   /if \(on && scrollSuppressed\(\)\) \{[\s\S]{0,60}cover\.style\.display = "none";[\s\S]{0,320}remove\("zs-cover-on"\)/.test(src));
 

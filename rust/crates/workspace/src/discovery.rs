@@ -175,7 +175,9 @@ pub fn workspace_choices(editor: Editor) -> Vec<PathBuf> {
     }
     if editor == Editor::Zed {
         if let Some(db) = zed_database() {
-            if let Ok(connection) = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY) {
+            if let Ok(connection) =
+                Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            {
                 let _ = connection.busy_timeout(Duration::from_millis(250));
                 if let Ok(mut statement) = connection.prepare("SELECT paths FROM workspaces WHERE remote_connection_id IS NULL ORDER BY timestamp DESC, workspace_id DESC LIMIT 40") {
                     if let Ok(rows) = statement.query_map([], |row| row.get::<_, String>(0)) {

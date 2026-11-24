@@ -7,6 +7,8 @@ presentation/
 config.json
 
 # Build output and local backups
+dist/
+snapgent-extension-broken-*/
 routergent/
 dist_tmp/
 build_tmp/

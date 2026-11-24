@@ -239,22 +239,34 @@ impl Manager {
         let mut pins = self.session_pins.lock().await;
         let key = (session.to_owned(), server.to_owned());
         if let Some(existing) = pins.get(&key) {
-            if existing.fixed_root() == workspace.fixed_root() && existing.available() { return Ok(()); }
+            if existing.fixed_root() == workspace.fixed_root() && existing.available() {
+                return Ok(());
+            }
             bail!("Session bound to a different workspace");
         }
         if pins.len() >= 128 {
             bail!("Workspace session limit reached");
         }
-        let root = workspace.fixed_root().context("Expected an explicitly bound workspace")?.to_path_buf();
+        let root = workspace
+            .fixed_root()
+            .context("Expected an explicitly bound workspace")?
+            .to_path_buf();
         let mut roots = self.bound_roots.lock().await;
         roots.retain(|_, weak| weak.strong_count() > 0);
-        let shared = roots.get(&root).and_then(std::sync::Weak::upgrade).unwrap_or_else(|| Arc::new(workspace));
+        let shared = roots
+            .get(&root)
+            .and_then(std::sync::Weak::upgrade)
+            .unwrap_or_else(|| Arc::new(workspace));
         roots.insert(root, Arc::downgrade(&shared));
         pins.insert(key, shared);
         Ok(())
     }
     pub async fn binding_root(&self, session: &str, server: &str) -> Option<PathBuf> {
-        self.session_pins.lock().await.get(&(session.to_owned(), server.to_owned())).and_then(|w| w.fixed_root().map(Path::to_path_buf))
+        self.session_pins
+            .lock()
+            .await
+            .get(&(session.to_owned(), server.to_owned()))
+            .and_then(|w| w.fixed_root().map(Path::to_path_buf))
     }
     pub async fn session_backend(&self, session: &str, server: &str) -> Result<Backend> {
         if !snapgent_security::valid_nonce(session) {

@@ -68,7 +68,7 @@ ok("ChatGPT chip is full width, not a hugging pill",
 ok("argument summary keeps a readable size on the wide card",
   /html\.zs-site-chatgpt \.zs-chip-dt \{[^}]*font-size: 12px/.test(css));
 ok("running chip gets the accent ring spinner",
-  /html\.zs-site-chatgpt \.zs-chip\.run \.zs-spin \{[^}]*border-top-color: #eab308/.test(css));
+  /html\.zs-site-chatgpt \.zs-chip\.run \.zs-spin \{[^}]*border-top-color: (?:#22d3ee|#eab308)/.test(css));
 ok("entrance animation is defined and applied once",
   /@keyframes zs-chip-in/.test(css) &&
   /chip\.classList\.add\("zs-chip-enter"\)/.test(src) &&

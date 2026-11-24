@@ -55,6 +55,7 @@ pub fn register(settings: &Settings) -> Result<()> {
         "Microsoft\\Edge",
         "BraveSoftware\\Brave-Browser",
         "Chromium",
+        "Vivaldi",
     ] {
         let key = format!("HKCU\\Software\\{browser}\\NativeMessagingHosts\\{HOST}");
         let status = std::process::Command::new("reg.exe")

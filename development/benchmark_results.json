@@ -1,0 +1,19 @@
+{
+  "pid": 34536,
+  "idleWorkingSetMiB": "14.87",
+  "idlePrivateMemoryMiB": "4.88",
+  "idleThreads": 7,
+  "activeWorkingSetMiB": "15.61",
+  "activePrivateMemoryMiB": "5.66",
+  "activeThreads": 7,
+  "workingSetGrowthMiB": "0.77",
+  "privateMemoryGrowthMiB": "0.82",
+  "reconnectMinMs": "3.64",
+  "reconnectAvgMs": "10.82",
+  "reconnectMaxMs": "38.76",
+  "mcpLatencyMinMs": "2.25",
+  "mcpLatencyMeanMs": "2.93",
+  "mcpLatencyMedianMs": "2.84",
+  "mcpLatencyP95Ms": "3.98",
+  "mcpLatencyMaxMs": "4.48"
+}
