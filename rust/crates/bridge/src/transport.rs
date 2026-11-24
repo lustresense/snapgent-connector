@@ -27,7 +27,7 @@ use std::{
 use tokio::{
     net::TcpListener,
     sync::{Mutex, broadcast, mpsc},
-    task::JoinSet,
+    task::{AbortHandle, JoinSet},
 };
 
 pub async fn serve_ws(listener: TcpListener, state: Arc<State>) -> Result<()> {
@@ -129,26 +129,85 @@ async fn client(mut socket: WebSocket, state: Arc<State>) {
     let (tx, mut rx) = mpsc::channel::<Value>(32);
     let mut tasks = JoinSet::new();
     let mut sessions: HashMap<String, Arc<Mutex<Session>>> = HashMap::new();
+    let mut calls: HashMap<(String, String), (AbortHandle, Value)> = HashMap::new();
     loop {
         if *shutdown.borrow() {
             break;
         }
         tokio::select! {
             _=shutdown.changed()=>break,
-            message=reader.next()=>{match message{
-                Some(Ok(Message::Text(text)))=>{match serde_json::from_str::<Value>(&text){
-                    Ok(request) if request.is_object()=>{let kind=request["type"].as_str().unwrap_or("");if kind=="call_tool"{let key=request["session"].as_str().filter(|s|snapgent_security::valid_nonce(s)).unwrap_or("legacy").to_owned();if tasks.len()>=32 || (!sessions.contains_key(&key) && sessions.len()>=128){let _=writer.send(Message::Text(json!({"type":"tool_result","id":request["id"],"ok":false,"kind":"busy","error":"Request queue full"}).to_string().into())).await;}else{let session=sessions.entry(key).or_insert_with(||Arc::new(Mutex::new(Session::default()))).clone();let state=state.clone();let tx=tx.clone();tasks.spawn(async move{let mut session=session.lock().await;if let Some(response)=protocol::handle(state,&mut session,request).await{let _=tx.send(response).await;}});}}else if tasks.len()<34{let state=state.clone();let tx=tx.clone();tasks.spawn(async move{if let Some(response)=protocol::handle(state,&mut Session::default(),request).await{let _=tx.send(response).await;}});}else{let _=writer.send(Message::Text(json!({"type":"error","id":request["id"],"error":"Request queue full"}).to_string().into())).await;}},
-                    _=>{let _=writer.send(Message::Text(json!({"type":"error","error":"Invalid JSON request"}).to_string().into())).await;}
-                }},
-                Some(Ok(Message::Close(_)))|None|Some(Err(_))=>break,
-                _=>{}
-            }},
+            message = reader.next() => {
+                match message {
+                    Some(Ok(Message::Text(text))) => {
+                        let request = match serde_json::from_str::<Value>(&text) {
+                            Ok(v) if v.is_object() => v,
+                            _ => {
+                                let _ = writer.send(Message::Text(json!({"type":"error","error":"Invalid JSON request"}).to_string().into())).await;
+                                continue;
+                            }
+                        };
+                        calls.retain(|_, (task, _)| !task.is_finished());
+                        let kind = request["type"].as_str().unwrap_or("");
+                        let call_key = request["session"].as_str()
+                            .filter(|s| snapgent_security::valid_nonce(s))
+                            .zip(request["call_id"].as_str().filter(|s| !s.is_empty() && s.len() <= 128))
+                            .map(|(session, call)| (session.to_owned(), call.to_owned()));
+                        if kind == "cancel_tool" {
+                            let cancelled = call_key.and_then(|key| calls.remove(&key));
+                            let found = cancelled.is_some();
+                            if let Some((task, id)) = cancelled {
+                                task.abort();
+                                let _ = writer.send(Message::Text(json!({"type":"tool_result","id":id,"ok":false,"kind":"cancelled","error":"Cancellation requested; verify partial changes"}).to_string().into())).await;
+                            }
+                            let _ = writer.send(Message::Text(json!({"type":"tool_result","id":request["id"],"ok":true,"cancelled":found}).to_string().into())).await;
+                        } else if kind == "call_tool" {
+                            let key = request["session"].as_str().filter(|s| snapgent_security::valid_nonce(s)).unwrap_or("legacy").to_owned();
+                            if tasks.len() >= 32 || (!sessions.contains_key(&key) && sessions.len() >= 128) ||
+                                call_key.as_ref().is_some_and(|key| calls.contains_key(key)) {
+                                let _ = writer.send(Message::Text(json!({"type":"tool_result","id":request["id"],"ok":false,"kind":"busy","error":"Request queue full or duplicate active call"}).to_string().into())).await;
+                            } else {
+                                let session = sessions.entry(key).or_insert_with(|| Arc::new(Mutex::new(Session::default()))).clone();
+                                let state = state.clone();
+                                let tx = tx.clone();
+                                let id = request["id"].clone();
+                                let task = tasks.spawn(async move {
+                                    let mut session = session.lock().await;
+                                    if let Some(response) = protocol::handle(state, &mut session, request).await {
+                                        let _ = tx.send(response).await;
+                                    }
+                                });
+                                if let Some(key) = call_key { calls.insert(key, (task, id)); }
+                            }
+                        } else if tasks.len() < 34 {
+                            if kind == "workspace_release" {
+                                if let Some(key) = request["session"].as_str() {
+                                    if !calls.keys().any(|(session, _)| session == key) {
+                                        sessions.remove(key);
+                                    }
+                                }
+                            }
+                            let state = state.clone();
+                            let tx = tx.clone();
+                            tasks.spawn(async move {
+                                if let Some(response) = protocol::handle(state, &mut Session::default(), request).await {
+                                    let _ = tx.send(response).await;
+                                }
+                            });
+                        } else {
+                            let _ = writer.send(Message::Text(json!({"type":"error","id":request["id"],"error":"Request queue full"}).to_string().into())).await;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                    _ => {}
+                }
+            },
             Some(response)=rx.recv()=>{if writer.send(Message::Text(response.to_string().into())).await.is_err(){break;}},
             update=catalog.recv()=>{match update{Ok(value)=>{if writer.send(Message::Text(value.to_string().into())).await.is_err(){break;}},Err(broadcast::error::RecvError::Lagged(_))=>{},Err(_)=>break}},
             _=tasks.join_next(),if !tasks.is_empty()=>{}
         }
     }
     tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
     let _ = tokio::time::timeout(Duration::from_millis(500), writer.send(Message::Close(None))).await;
     state.events.log("Local client disconnected");
 }

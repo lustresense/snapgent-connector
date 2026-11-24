@@ -5,7 +5,7 @@ use snapgent_workspace::{Editor, Workspace};
 use std::{
     collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, atomic::{AtomicBool, Ordering}},
 };
 use tokio::sync::{Mutex, RwLock};
 
@@ -304,8 +304,15 @@ impl Manager {
     pub async fn call(backend: Backend, name: String, args: Value, timeout: u64) -> Result<Value> {
         match backend {
             Backend::Builtin(workspace) => {
-                let result =
-                    tokio::task::spawn_blocking(move || workspace.call(&name, &args)).await??;
+                struct CancelOnDrop(Arc<AtomicBool>);
+                impl Drop for CancelOnDrop {
+                    fn drop(&mut self) { self.0.store(true, Ordering::Release); }
+                }
+                let cancelled = Arc::new(AtomicBool::new(false));
+                let _cancel = CancelOnDrop(cancelled.clone());
+                let result = tokio::task::spawn_blocking(move || {
+                    workspace.call_cancelable(&name, &args, &cancelled)
+                }).await??;
                 let text = result
                     .as_str()
                     .map(str::to_owned)

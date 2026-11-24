@@ -8,13 +8,15 @@ async fn native_bridge_lifecycle() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join("config.json"),
-        r#"{"mcpServers":{"zed":{},"vscode":{}}}"#,
+        r#"{"mcpServers":{"zed":{},"vscode":{},"disabled_external":{"command":"invalid-never-start","enabled":false}}}"#,
     )
     .unwrap();
     let state = State::new(root.clone(), "ab".repeat(32), vec![]).unwrap();
     state.manager.start().await.unwrap();
     let snapshot = state.manager.snapshot().await;
     assert_eq!(snapshot["servers"].as_array().unwrap().len(), 1);
+    assert_eq!(snapshot["servers"][0]["id"], "local");
+    assert_eq!(snapshot["tools"].as_array().unwrap().len(), 28);
     assert!(
         state
             .manager
@@ -35,6 +37,8 @@ async fn native_bridge_lifecycle() {
     tokio::time::sleep(Duration::from_millis(30)).await;
     state.approvals.take().unwrap().respond(false);
     assert!(!pending.await.unwrap());
+    state.request_stop();
+    assert!(!state.approvals.ask("Must not approve after shutdown", json!({}), true).await);
     state.manager.stop().await;
     assert_eq!(state.manager.snapshot().await["servers"], json!([]));
     std::fs::remove_dir_all(root).unwrap();

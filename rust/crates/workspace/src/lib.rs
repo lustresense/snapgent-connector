@@ -8,7 +8,7 @@ use anyhow::{Result, bail};
 pub use discovery::{Editor, active_workspace, workspace_choices};
 use paths::{WorkspacePin, relative, target};
 use serde_json::{Value, json};
-use std::{fs, path::Path, sync::Mutex};
+use std::{fs, path::Path, sync::{Mutex, atomic::{AtomicBool, Ordering}}};
 
 pub struct Workspace {
     editor: Editor,
@@ -49,6 +49,10 @@ impl Workspace {
         tools
     }
     pub fn call(&self, name: &str, args: &Value) -> Result<Value> {
+        self.call_cancelable(name, args, &AtomicBool::new(false))
+    }
+    pub fn call_cancelable(&self, name: &str, args: &Value, cancelled: &AtomicBool) -> Result<Value> {
+        if cancelled.load(Ordering::Acquire) { bail!("Workspace operation cancelled"); }
         let candidate = match &self.fixed_root {
             Some(root) => {
                 let resolved = paths::local_root(root)?;
@@ -64,8 +68,9 @@ impl Workspace {
             .pin
             .lock()
             .map_err(|_| anyhow::anyhow!("Workspace lock unavailable"))?;
+        if cancelled.load(Ordering::Acquire) { bail!("Workspace operation cancelled"); }
         let root = pin.pin(&candidate)?;
-        dispatch(&root, name, args)
+        dispatch_cancelable(&root, name, args, cancelled)
     }
 }
 
@@ -136,6 +141,10 @@ fn project_info(root: &Path) -> Result<Value> {
 }
 
 pub fn dispatch(root: &Path, name: &str, a: &Value) -> Result<Value> {
+    dispatch_cancelable(root, name, a, &AtomicBool::new(false))
+}
+fn dispatch_cancelable(root: &Path, name: &str, a: &Value, cancelled: &AtomicBool) -> Result<Value> {
+    if cancelled.load(Ordering::Acquire) { bail!("Workspace operation cancelled"); }
     let path = || required(a, "path");
     let result = match name {
         "get_workspace_info" => workspace_info(root),
@@ -247,7 +256,7 @@ pub fn dispatch(root: &Path, name: &str, a: &Value) -> Result<Value> {
             name == "copy_file"
         )?),
         "git_status" | "git_diff" | "git_log" | "git_branches" | "git_add" | "git_commit" => {
-            json!(process::git(root, name, a)?)
+            json!(process::git(root, name, a, cancelled)?)
         }
         "run_command" => json!(process::shell(
             root,
@@ -257,10 +266,10 @@ pub fn dispatch(root: &Path, name: &str, a: &Value) -> Result<Value> {
             } else {
                 strings(a, "args")?
             },
-            30
+            30, cancelled
         )?),
-        "run_project_script" => json!(process::project_script(root, required(a, "script")?)?),
-        "run_tests" => json!(process::run_tests(root)?),
+        "run_project_script" => json!(process::project_script(root, required(a, "script")?, cancelled)?),
+        "run_tests" => json!(process::run_tests(root, cancelled)?),
         "delete_file" => json!(files::delete(root, path()?)?),
         "apply_patch" => json!(files::patch(root, path()?, array(a, "edits")?)?),
         _ => bail!("Unknown tool: {name}"),

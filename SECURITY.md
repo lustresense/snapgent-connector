@@ -17,7 +17,7 @@ Use the native Rust application launched by `start.bat`. Configure the trusted b
 
 ## Limitations
 
-This is not an operating-system sandbox. Approved commands, Git hooks and external MCP executables can access resources or networks permitted to the current OS account. Filesystem checks do not eliminate hard-link attacks, mapped network drives or race conditions. UNC paths, including WSL UNC shares, are not supported by local workspace mode.
+This is not an operating-system sandbox. Approved commands, Git hooks and external MCP executables can access resources or networks permitted to the current OS account. Filesystem checks do not eliminate hard-link attacks, mapped network drives or race conditions. Stop requests cancel queued local calls and signal running local commands; Windows process-tree termination is best-effort, not rollback. Already completed writes, detached child processes and external MCP side effects may survive cancellation. Verify partial changes before repeating commands. UNC paths, including WSL UNC shares, are not supported by local workspace mode.
 
 The obsolete headless and CLI trust flags no longer enable a bridge without a window. Keep the UI's terminal trust option disabled for untrusted tasks. Tool output submitted to a chat is transmitted to the selected AI provider. Do not expose secrets or private files unnecessarily. Use an isolated VM or low-privilege account for untrusted projects.
 

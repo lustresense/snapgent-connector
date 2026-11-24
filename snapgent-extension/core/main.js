@@ -1389,30 +1389,38 @@
       args.datamodel_type = "Client";
     const boundWorkspace = isWorkspaceTarget() ? await loadWorkspaceChoice() : null;
     if (isWorkspaceTarget() && A.bridge.workspaceBinding && !boundWorkspace) {
-      ui.banner("warn","Choose workspace","Use the Workspace button in the Snapgent bar, then continue this conversation.");
+      ui.banner("warn","Choose workspace","Choose the local folder from the target selector, then continue this conversation.");
       return "ERROR: No workspace selected. Ask the user to choose the workspace in the Snapgent bar before continuing.";
     }
     if (A.stop || (dispatchConversation && P.conversationKey() !== dispatchConversation)) return "ERROR: command not run - stopped or conversation changed.";
     const workspaceFields = boundWorkspace ? {workspace:boundWorkspace.workspace,session:boundWorkspace.session} : {};
     const timeout = name === "execute_luau" ? 20000 : 120000;
-    // Hard watchdog: even if the background worker never answers, the loop
-    // gets a definitive result and continues.
-    const hardCap = new Promise((res) =>
-      setTimeout(() => res({ ok: false, kind: "timeout", error: "no response from the extension worker" }), timeout + (boundWorkspace ? 135000 : 30000)));
-    // Stop watcher: a blocking tool (e.g. wait_job_finished) would otherwise keep
-    // the loop awaiting the bridge for up to minutes, leaving the input locked and
-    // the Stop button stuck. When the user halts (A.stop), abandon the wait within
-    // ~150ms so the loop breaks and its finally unlocks everything. The in-flight
-    // bridge call may still finish in the background; its result is just ignored.
-    let stopTimer;
-    const stopWatch = new Promise((res) => {
-      stopTimer = setInterval(() => { if (A.stop) res({ ok: false, kind: "stopped" }); }, 150);
-    });
+    const callId = `tool-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const dispatchTool = async () => {
+      let deadline, stopTimer;
+      const stopped = () => A.stop || (dispatchConversation && P.conversationKey() !== dispatchConversation);
+      if (stopped()) return {ok:false,kind:"stopped",sent:false};
+      const hardCap = new Promise(resolve => {
+        deadline = setTimeout(() => resolve({ok:false,kind:"timeout",error:"no response from the extension worker"}), timeout + (boundWorkspace ? 135000 : 30000));
+      });
+      const stopWatch = new Promise(resolve => {
+        stopTimer = setInterval(() => { if (stopped()) resolve({ok:false,kind:"stopped"}); }, 120);
+      });
+      try {
+        const result = await Promise.race([
+          bg({type:"call_tool",name,arguments:args,timeout,server:selectedTargetId,turn:turnKeyForCache,call_id:callId,...workspaceFields}),
+          hardCap, stopWatch
+        ]);
+        if (boundWorkspace && result && ["stopped","timeout"].includes(result.kind)) {
+          bg({type:"cancel_tool",session:boundWorkspace.session,call_id:callId}).catch(() => {});
+        }
+        return result;
+      } finally { clearTimeout(deadline); clearInterval(stopTimer); }
+    };
     // Publish "still loading" frames while the bridge works. A long tool (a package
     // build, a big search) used to be completely invisible until it finished; now
     // `GET http://127.0.0.1:<PORT+1>/events` on the bridge streams these so the run
     // is observable while it happens. Advisory only: never awaited, never fatal.
-    const callId = `tool-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const loadingAt = Date.now();
     const loadingTick = setInterval(() => {
       bg({
@@ -1423,9 +1431,9 @@
       }).catch(() => {});
     }, 1000);
     bg({ type: "stream", frame: { phase: "tool_start", tool: name, id: callId, tok: A.genTok || 0 } }).catch(() => {});
-    let r = await Promise.race([bg({ type: "call_tool", name, arguments: args, timeout, server: selectedTargetId, turn: turnKeyForCache, ...workspaceFields }), hardCap, stopWatch]);
-    clearInterval(loadingTick);
-    clearInterval(stopTimer);
+    let r;
+    try { r = await dispatchTool(); }
+    finally { clearInterval(loadingTick); }
     bg({
       type: "stream",
       frame: {
@@ -1527,10 +1535,8 @@
       diag("bridge.disconnectedRetry", { name });
       await new Promise((res) => setTimeout(res, 1200));
       if (A.stop || (dispatchConversation && P.conversationKey() !== dispatchConversation)) return "ERROR: command not retried - stopped or conversation changed.";
-      const retry = await Promise.race([
-        bg({ type: "call_tool", name, arguments: args, timeout, server: selectedTargetId, turn: turnKeyForCache, ...workspaceFields }),
-        hardCap,
-      ]);
+      const retry = await dispatchTool();
+      if (retry && retry.kind === "stopped") return "(stopped by user)";
       // The retry itself has to be judged by the same rule. A second attempt
       // that goes out and then drops must NOT be reported as "bridge offline":
       // the tool may have run, and the model would retry it again.
@@ -3913,7 +3919,7 @@
         const chosen = await new Promise(resolve => {
           pop.querySelector("[data-cancel]").addEventListener("click",()=>resolve(null));
           pop.querySelector("[data-confirm]").addEventListener("click",()=>{ if(input.value.trim()) resolve(input.value.trim()); });
-          pop.addEventListener("keydown", e=>{ if(e.key==="Escape") resolve(null); e.stopPropagation(); });
+          pop.addEventListener("keydown", e=>{ if(e.key==="Escape") { e.preventDefault(); resolve(null); } else if(e.key==="Enter" && !e.isComposing && input.value.trim()) { e.preventDefault(); resolve(input.value.trim()); } e.stopPropagation(); });
         });
         if (!chosen || key !== workspaceKey() || A.running || A.starting || A.injecting) return;
         if (current && current.workspace === chosen) { toast("Workspace already selected."); return; }

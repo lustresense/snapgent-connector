@@ -27,6 +27,9 @@ fn canonical(value: &Value) -> Value {
 pub async fn handle(state: Arc<State>, session: &mut Session, request: Value) -> Option<Value> {
     let id = request["id"].clone();
     let kind = request["type"].as_str().unwrap_or("");
+    if *state.shutdown.borrow() {
+        return Some(error(&id, "disconnected", "Bridge is stopping"));
+    }
     let response = match kind {
         "ping" => json!({"type":"pong","id":id}),
         "list_tools" => {
@@ -189,45 +192,33 @@ pub async fn handle(state: Arc<State>, session: &mut Session, request: Value) ->
                 error(&id, "permission_denied", "Invalid workspace binding")
             } else if let Some(path) = requested {
                 let editor = editor.unwrap();
-                match tokio::task::spawn_blocking(move || {
-                    anyhow::ensure!(path.is_absolute(), "Select an absolute local directory");
-                    snapgent_workspace::Workspace::bound(editor, &path)
-                })
-                .await
-                {
-                    Ok(Ok(workspace)) => {
-                        let root = workspace.fixed_root().expect("bound root").to_path_buf();
-                        if let Some(existing) = state.manager.binding_root(sid, server).await {
-                            if existing == root && workspace.available() {
-                                json!({"type":"tool_result","id":id,"ok":true,"text":root.to_string_lossy()})
+                let existing = state.manager.binding_root(sid, server).await;
+                if !path.is_absolute() {
+                    error(&id, "permission_denied", "Select an absolute local directory")
+                } else if existing.is_none() && !state.approvals.ask(
+                    "Bind agent to workspace",
+                    json!({"server":server,"workspace":path.to_string_lossy()}),
+                    false,
+                ).await {
+                    error(&id, "permission_denied", "Workspace binding denied")
+                } else if *state.shutdown.borrow() {
+                    error(&id, "disconnected", "Bridge is stopping")
+                } else {
+                    match tokio::task::spawn_blocking(move || snapgent_workspace::Workspace::bound(editor, &path)).await {
+                        Ok(Ok(workspace)) => {
+                            let root = workspace.fixed_root().expect("bound root").to_path_buf();
+                            if existing.as_ref().is_some_and(|old| old != &root) {
+                                error(&id, "permission_denied", "Session is bound to a different workspace")
                             } else {
-                                error(
-                                    &id,
-                                    "permission_denied",
-                                    "Session is bound to a different workspace",
-                                )
-                            }
-                        } else if !state
-                            .approvals
-                            .ask(
-                                "Bind agent to workspace",
-                                json!({"server":server,"workspace":root.to_string_lossy()}),
-                                false,
-                            )
-                            .await
-                        {
-                            error(&id, "permission_denied", "Workspace binding denied")
-                        } else {
-                            match state.manager.bind_session(sid, server, workspace).await {
-                                Ok(()) => {
-                                    json!({"type":"tool_result","id":id,"ok":true,"text":root.to_string_lossy()})
+                                match state.manager.bind_session(sid, server, workspace).await {
+                                    Ok(()) => json!({"type":"tool_result","id":id,"ok":true,"text":root.to_string_lossy()}),
+                                    Err(e) => error(&id, "tool_error", e),
                                 }
-                                Err(e) => error(&id, "tool_error", e),
                             }
                         }
+                        Ok(Err(e)) => error(&id, "tool_error", e),
+                        Err(e) => error(&id, "tool_error", e),
                     }
-                    Ok(Err(e)) => error(&id, "tool_error", e),
-                    Err(e) => error(&id, "tool_error", e),
                 }
             } else {
                 error(&id, "permission_denied", "Select the exact workspace first")
@@ -346,6 +337,9 @@ async fn call(state: Arc<State>, session: &mut Session, request: Value) -> Value
             .await
     {
         return error(id, "permission_denied", "Local approval denied");
+    }
+    if *state.shutdown.borrow() {
+        return error(id, "disconnected", "Bridge is stopping");
     }
     let guard = state.events.begin(id.clone(), name, &server);
     let timeout = (request["timeout"].as_u64().unwrap_or(120000) / 1000).clamp(1, 300);

@@ -581,6 +581,14 @@ async function waitWorkspaceCapability() {
   return connected ? workspaceBinding : null;
 }
 
+// Keep cancelled IDs while a call may still be awaiting a binding approval.
+const cancelledCalls = new Map();
+const cancellationKey = msg => msg.session + ":" + msg.call_id;
+function pruneCancelledCalls() {
+  const cutoff = Date.now() - 600000;
+  for (const [key, at] of cancelledCalls) if (at < cutoff) cancelledCalls.delete(key);
+  while (cancelledCalls.size > 512) cancelledCalls.delete(cancelledCalls.keys().next().value);
+}
 // ── messages from content.js / popup.js ─────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg && msg.type === "status") {
@@ -643,7 +651,19 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         }
         sendResponse({ok:true}); break;
       }
+      case "cancel_tool": {
+        if (validCredential(msg.session) && typeof msg.call_id === "string" && msg.call_id.length <= 128) {
+          cancelledCalls.set(cancellationKey(msg), Date.now());
+          pruneCancelledCalls();
+          if (connected) await send({type:"cancel_tool", session:msg.session, call_id:msg.call_id}, 5000);
+        }
+        sendResponse({ok:true}); break;
+      }
       case "call_tool": {
+        pruneCancelledCalls();
+        const wasCancelled = () => msg.call_id && cancelledCalls.has(cancellationKey(msg));
+        const cancelled = () => sendResponse({ok:false,kind:"cancelled",sent:false,error:"Cancelled before dispatch"});
+        if (wasCancelled()) { cancelled(); break; }
         const timeout = (msg.timeout || 120000) + 10000;
         const localWorkspace = msg.server === "local";
         const payload = {type:"call_tool", name:msg.name, arguments:msg.arguments, timeout:msg.timeout, server:msg.server, turn:msg.turn};
@@ -653,14 +673,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           {
             if (!capability) { sendResponse({ok:false,kind:"workspace_required",sent:false,error:"Rebuild and restart the native bridge before using a saved workspace."}); break; }
             const bound = await ensureWorkspaceBound(msg);
+            if (wasCancelled()) { cancelled(); break; }
             if (!bound.ok) { sendResponse({...bound,sent:false}); break; }
             payload.session = msg.session;
+            payload.call_id = msg.call_id;
           }
         }
+        if (wasCancelled()) { cancelled(); break; }
         let result = await send(payload,timeout);
         // An explicit unbound error is emitted before execution, so recovery may retry safely.
         if (payload.session && result.kind === "workspace_unbound") {
           const bound = await ensureWorkspaceBound(msg,true);
+          if (wasCancelled()) { cancelled(); break; }
           if (bound.ok) result = await send(payload,timeout);
           else result = {...bound,sent:false};
         }

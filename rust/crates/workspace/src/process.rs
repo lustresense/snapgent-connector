@@ -8,12 +8,27 @@ use std::{
     fs,
     io::Read,
     path::Path,
-    process::Stdio,
+    process::{Child, Stdio},
+    sync::atomic::{AtomicBool, Ordering},
     thread,
     time::{Duration, Instant},
 };
 
-pub fn run(root: &Path, command: &[String], timeout: u64) -> Result<String> {
+// Terminate this known running child. Windows taskkill /T attempts to include
+// descendants; detached descendants can escape, so cancellation is not rollback.
+fn terminate(child: &mut Child) {
+    if !matches!(child.try_wait(), Ok(None)) { return; }
+    #[cfg(windows)]
+    {
+        let pid = child.id().to_string();
+        let _ = hidden_command("taskkill.exe").args(["/PID", &pid, "/T", "/F"])
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+pub fn run(root: &Path, command: &[String], timeout: u64, cancelled: &AtomicBool) -> Result<String> {
+    if cancelled.load(Ordering::Acquire) { bail!("Command cancelled before execution"); }
     let Some(program) = command.first() else {
         bail!("Command cannot be empty.");
     };
@@ -77,16 +92,30 @@ pub fn run(root: &Path, command: &[String], timeout: u64) -> Result<String> {
     let stderr = drain(child.stderr.take().expect("piped stderr"));
     let started = Instant::now();
     let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
+        if cancelled.load(Ordering::Acquire) {
+            terminate(&mut child);
+            bail!("Command cancelled; verify any partial changes");
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {},
+            Err(e) => { terminate(&mut child); return Err(e.into()); }
         }
         if started.elapsed() >= Duration::from_secs(timeout) {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("Command timed out after {timeout} seconds");
+            terminate(&mut child);
+            bail!("Command timed out after {timeout} seconds; verify any partial changes");
         }
         thread::sleep(Duration::from_millis(25));
     };
+    // A descendant can retain inherited pipes after its parent exits.
+    // Bound the drain so the GUI cannot hang forever joining reader threads.
+    let drain_started = Instant::now();
+    while !stdout.is_finished() || !stderr.is_finished() {
+        if cancelled.load(Ordering::Acquire) || drain_started.elapsed() >= Duration::from_secs(2) {
+            bail!("Command ended but output pipes remained open; verify the result");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
     let out = stdout.join().unwrap_or_default();
     let err = stderr.join().unwrap_or_default();
     let out = String::from_utf8_lossy(&out);
@@ -112,7 +141,7 @@ fn strings(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|s| (*s).into()).collect()
 }
 
-pub fn shell(root: &Path, command: &str, args: &[String], timeout: u64) -> Result<String> {
+pub fn shell(root: &Path, command: &str, args: &[String], timeout: u64, cancelled: &AtomicBool) -> Result<String> {
     if command.trim().is_empty() {
         bail!("Command cannot be empty.");
     }
@@ -122,10 +151,10 @@ pub fn shell(root: &Path, command: &str, args: &[String], timeout: u64) -> Resul
         vec![command.to_owned()]
     };
     parts.extend_from_slice(args);
-    run(root, &parts, timeout)
+    run(root, &parts, timeout, cancelled)
 }
 
-pub fn git(root: &Path, name: &str, args: &Value) -> Result<String> {
+pub fn git(root: &Path, name: &str, args: &Value, cancelled: &AtomicBool) -> Result<String> {
     let mut timeout = 30;
     let command = match name {
         "git_status" => strings(&["git", "status", "--short", "--branch"]),
@@ -171,7 +200,7 @@ pub fn git(root: &Path, name: &str, args: &Value) -> Result<String> {
             }
             let mut command = strings(&["git", "add", "--"]);
             command.extend(relatives.clone());
-            run(root, &command, timeout)?;
+            run(root, &command, timeout, cancelled)?;
             return Ok(format!(
                 "Staged {} path(s): {}",
                 relatives.len(),
@@ -188,10 +217,10 @@ pub fn git(root: &Path, name: &str, args: &Value) -> Result<String> {
         }
         _ => bail!("Unknown Git tool: {name}"),
     };
-    run(root, &command, timeout)
+    run(root, &command, timeout, cancelled)
 }
 
-pub fn project_script(root: &Path, script: &str) -> Result<String> {
+pub fn project_script(root: &Path, script: &str, cancelled: &AtomicBool) -> Result<String> {
     if !["build", "check", "format", "lint", "test", "typecheck"].contains(&script) {
         bail!("Script must be one of: build, check, format, lint, test, typecheck.");
     }
@@ -208,18 +237,18 @@ pub fn project_script(root: &Path, script: &str) -> Result<String> {
     } else {
         "npm"
     };
-    shell(root, manager, &strings(&["run", script]), 300)
+    shell(root, manager, &strings(&["run", script]), 300, cancelled)
 }
 
-pub fn run_tests(root: &Path) -> Result<String> {
+pub fn run_tests(root: &Path, cancelled: &AtomicBool) -> Result<String> {
     if target(root, "package.json")?.is_file() {
-        return project_script(root, "test");
+        return project_script(root, "test", cancelled);
     }
     if target(root, "pyproject.toml")?.is_file() || target(root, "pytest.ini")?.is_file() {
         return if cfg!(windows) {
-            run(root, &strings(&["py.exe", "-3", "-m", "pytest"]), 300)
+            run(root, &strings(&["py.exe", "-3", "-m", "pytest"]), 300, cancelled)
         } else {
-            run(root, &strings(&["python3", "-m", "pytest"]), 300)
+            run(root, &strings(&["python3", "-m", "pytest"]), 300, cancelled)
         };
     }
     if fs::read_dir(root)?.flatten().any(|entry| {
@@ -228,7 +257,31 @@ pub fn run_tests(root: &Path) -> Result<String> {
             Some("sln" | "csproj")
         )
     }) {
-        return run(root, &strings(&["dotnet", "test"]), 300);
+        return run(root, &strings(&["dotnet", "test"]), 300, cancelled);
     }
     bail!("No supported test setup found (package.json, pytest, or .NET project).")
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    #[test]
+    fn running_command_is_cancelled_promptly() {
+        let dir = tempfile::tempdir().unwrap();
+        let flag = std::sync::Arc::new(AtomicBool::new(false));
+        let trigger = flag.clone();
+        let thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            trigger.store(true, Ordering::Release);
+        });
+        let start = Instant::now();
+        let result = if cfg!(windows) {
+            run(dir.path(), &strings(&["ping.exe", "-n", "30", "127.0.0.1"]), 30, &flag)
+        } else {
+            run(dir.path(), &strings(&["sleep", "30"]), 30, &flag)
+        };
+        thread.join().unwrap();
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        assert!(start.elapsed() < Duration::from_secs(8));
+    }
 }
