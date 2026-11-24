@@ -2,7 +2,7 @@
 
 ## Recommended runtime
 
-Use the native Rust application launched by `start.bat`. Configure the trusted browser extension ID and pair locally. Keep privileged-operation approvals enabled. The legacy Python and Electron runtimes are outside the scope of this migration.
+Use the native Rust application launched by `start.bat`. Configure the trusted browser extension ID and pair locally. Keep privileged-operation approvals enabled. The desktop window owns the bridge lifecycle. Closing it stops the listeners and sessions; there is no background/headless server mode. Pairing is manual and does not launch a native messaging process. The legacy Python and Electron runtimes are outside the scope of this migration.
 
 ## Security controls
 
@@ -19,7 +19,7 @@ Use the native Rust application launched by `start.bat`. Configure the trusted b
 
 This is not an operating-system sandbox. Approved commands, Git hooks and external MCP executables can access resources or networks permitted to the current OS account. Filesystem checks do not eliminate hard-link attacks, mapped network drives or race conditions. UNC paths, including WSL UNC shares, are not supported by local workspace mode.
 
-Never enable `--auto-approve` or `--trust` for untrusted tasks. Tool output submitted to a chat is transmitted to the selected AI provider. Do not expose secrets or private files unnecessarily. Use an isolated VM or low-privilege account for untrusted projects.
+The obsolete headless and CLI trust flags no longer enable a bridge without a window. Keep the UI's terminal trust option disabled for untrusted tasks. Tool output submitted to a chat is transmitted to the selected AI provider. Do not expose secrets or private files unnecessarily. Use an isolated VM or low-privilege account for untrusted projects.
 
 No dedicated telemetry endpoint was identified in the reviewed native bridge and extension transport. This is not a guarantee about all dependencies, legacy code or future versions.
 

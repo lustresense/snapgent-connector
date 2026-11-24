@@ -93,7 +93,7 @@ async fn authenticate(socket: &mut WebSocket, state: &State) -> Result<()> {
     }
     socket
         .send(Message::Text(
-            json!({"type":"authenticated","nonce":server_nonce})
+            json!({"type":"authenticated","nonce":server_nonce,"ui_owned":true})
                 .to_string()
                 .into(),
         ))

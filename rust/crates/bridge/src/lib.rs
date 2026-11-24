@@ -4,7 +4,7 @@ mod events;
 mod manager;
 mod protocol;
 mod transport;
-use anyhow::Result;
+use anyhow::{Context, Result};
 pub use approval::{Approval, Approvals};
 pub use events::EventHub;
 pub use manager::Manager;
@@ -47,9 +47,13 @@ impl State {
         self.shutdown.send_replace(true);
     }
     pub async fn run(self: Arc<Self>, port: u16, stream_port: u16) -> Result<()> {
-        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
+            .await
+            .with_context(|| format!("Cannot bind 127.0.0.1:{port}: another bridge may be running"))?;
         let stream =
-            tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, stream_port)).await?;
+            tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, stream_port))
+                .await
+                .with_context(|| format!("Cannot bind 127.0.0.1:{stream_port}: another bridge may be running"))?;
         let optional_ipv6 = tokio::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, port))
             .await
             .ok();

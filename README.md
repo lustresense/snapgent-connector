@@ -21,8 +21,13 @@ No running code editor is required. Choose an absolute local folder before start
 1. Build the native executable using `powershell -File development/build-native.ps1`.
 2. Load `snapgent-extension` as an unpacked extension in your Chromium browser.
 3. Run `start.bat` and configure the trusted extension ID in the native application. A fresh clone needs no `config.json`; optional MCP integrations create it when configured.
-4. Pair the extension with the bridge locally.
-5. Open a supported AI chat, select Local Workspace, choose your absolute folder path and press Start.
+4. Copy the pairing credential from Settings in the visible desktop UI and paste it into the extension popup. Existing saved credentials continue working.
+5. Keep the desktop window open while using the agent. Stop bridge or close the window to disconnect all sessions.
+6. Open a supported AI chat, select Local Workspace, choose your absolute folder path and press Start.
+
+### Upgrading from an older bridge
+
+Close any old Snapgent windows or tray instances first. If a previous headless executable is still listening, check its process path and command line in Task Manager and stop only that known Snapgent instance before rebuilding. The new extension rejects legacy bridges instead of displaying them as connected. The new executable has no headless listener or hide-to-tray mode; legacy CLI flags open the UI.
 
 ## Supported providers
 

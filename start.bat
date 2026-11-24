@@ -7,4 +7,4 @@ if not exist "%~dp0dist\native\Snapgent.exe" (
     pause
     exit /b 1
 )
-start "Snapgent" "%~dp0dist\native\Snapgent.exe" %*
+start "Snapgent" "%~dp0dist\native\Snapgent.exe"

@@ -72,6 +72,7 @@ async fn authenticated_wire_contract() {
     let authenticated: Value =
         serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
     assert_eq!(authenticated["type"], "authenticated");
+    assert_eq!(authenticated["ui_owned"], true);
     let connected: Value =
         serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
     assert_eq!(connected["type"], "connected");
@@ -110,8 +111,14 @@ async fn authenticated_wire_contract() {
     .unwrap();
     assert_eq!(refused["ok"], false);
     assert_eq!(refused["kind"], "unknown_tool");
-    ws.close(None).await.unwrap();
+    // Stop while the extension is still connected. The UI shutdown must close
+    // the active connection, not only the listening port.
     state.request_stop();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(Ok(message)) = ws.next().await {
+            if message.is_close() { break; }
+        }
+    }).await.unwrap();
     tokio::time::timeout(Duration::from_secs(15), runner)
         .await
         .unwrap()

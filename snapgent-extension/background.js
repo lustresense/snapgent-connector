@@ -138,29 +138,9 @@ function credentialStore(mode, value) {
     };
   });
 }
-function nativeCredential() {
-  return new Promise((resolve) => {
-    if (!chrome.runtime.sendNativeMessage) return resolve(null);
-    const timer = setTimeout(() => resolve(null), 2500);
-    try {
-      chrome.runtime.sendNativeMessage("local.snapgent.pairing", { type: "pair" }, (reply) => {
-        clearTimeout(timer);
-        if (chrome.runtime.lastError) return resolve(null);
-        resolve(reply && reply.ok && validCredential(reply.token) ? reply.token : null);
-      });
-    } catch { clearTimeout(timer); resolve(null); }
-  });
-}
 async function getCredential() {
   const cached = await credentialStore("readonly");
-  if (validCredential(cached)) return cached;
-  const revision = credentialRevision;
-  const value = await nativeCredential();
-  if (validCredential(value) && revision === credentialRevision) {
-    await credentialStore("readwrite", value);
-    return value;
-  }
-  return null;
+  return validCredential(cached) ? cached : null;
 }
 const hex = (bytes) => Array.from(bytes, x => x.toString(16).padStart(2, "0")).join("");
 const unhex = (value) => Uint8Array.from(value.match(/../g), x => parseInt(x, 16));
@@ -196,9 +176,9 @@ function connect() {
   const revision = credentialRevision;
   let stage = "opening", key, clientNonce, serverNonce;
   const current = () => ws === socket && credentialRevision === revision && socket.readyState === WebSocket.OPEN;
-  const fail = (reason) => {
+  const fail = (reason, state = "pairing_required") => {
     if (ws !== socket) return;
-    connectionState = "pairing_required";
+    connectionState = state;
     connectionError = reason;
     broadcastStatus();
     try { socket.close(); } catch {}
@@ -245,6 +225,9 @@ function connect() {
         stage = "confirm";
         socket.send(JSON.stringify({ type: "authenticate", proof }));
       } else if (stage === "confirm" && msg.type === "authenticated" && msg.nonce === serverNonce) {
+        if (msg.ui_owned !== true) {
+          return fail("Old or hidden bridge rejected. Close the old Snapgent process and open the new desktop application.", "upgrade_required");
+        }
         stage = "ready";
         clearTimeout(deadline);
         connected = true;
@@ -263,7 +246,9 @@ function connect() {
     if (ws !== socket) return;
     ws = null;
     connected = false;
-    if (stage !== "opening" && stage !== "ready" && connectionState !== "pairing_required") {
+    if (connectionState === "upgrade_required") {
+      // Preserve the useful explanation rather than showing a false pairing error.
+    } else if (stage !== "opening" && stage !== "ready" && connectionState !== "pairing_required") {
       connectionState = "pairing_required";
       connectionError = "Bridge rejected pairing. Check trusted extension ID and credential.";
     } else if (connectionState !== "pairing_required") {
@@ -291,7 +276,7 @@ function connect() {
 
 function scheduleReconnect() {
   clearTimeout(reconnectTimer);
-  reconnectTimer = setTimeout(connect, connectionState === "pairing_required" ? 10000 : reconnectDelay);
+  reconnectTimer = setTimeout(connect, ["pairing_required", "upgrade_required"].includes(connectionState) ? 10000 : reconnectDelay);
   reconnectDelay = Math.min(reconnectDelay * 1.7, RECONNECT_MAX);
 }
 
@@ -528,7 +513,27 @@ function failAllPending(reason) {
 
 // ── status push to any open DeepSeek tab + popup ─────────────────────────
 function statusObj() {
-  return { type: "zs-status", connected, connectionState, connectionError, workspaceBinding, mcpAlive, bridgeVersion, studio: studioConnected, studioApp, studioProc, tools: toolsCache.length, servers: serversCache };
+  const live = !!(connected && ws && ws.readyState === WebSocket.OPEN);
+  return { type: "zs-status", connected: live, connectionState: !live && connectionState === "connected" ? "offline" : connectionState, connectionError, workspaceBinding: live ? workspaceBinding : null, mcpAlive: live && mcpAlive, bridgeVersion: live ? bridgeVersion : null, studio: live ? studioConnected : null, studioApp: live ? studioApp : null, studioProc: live ? studioProc : null, tools: live ? toolsCache.length : 0, servers: live ? serversCache : [] };
+}
+let statusProbe = null;
+async function verifyStatus() {
+  if (!statusObj().connected || Date.now() - lastMessageAt < 2000) return statusObj();
+  if (!statusProbe) {
+    const socket = ws;
+    const probe = (async () => {
+      const pong = await send({ type: "ping" }, 2000).catch(() => null);
+      if (ws === socket && !(pong && pong.ok)) {
+        connected = false;
+        connectionState = "offline";
+        try { socket.close(); } catch {}
+      }
+    })();
+    statusProbe = probe;
+    probe.finally(() => { if (statusProbe === probe) statusProbe = null; });
+  }
+  await statusProbe;
+  return statusObj();
 }
 
 function broadcastStatus() {
@@ -580,8 +585,8 @@ async function waitWorkspaceCapability() {
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg && msg.type === "status") {
     if (!connected) connect(); // self-heal after a worker wake-up
-    sendResponse(statusObj());
-    return false; // synchronous response
+    verifyStatus().then(sendResponse, () => sendResponse(statusObj()));
+    return true;
   }
   (async () => {
     switch (msg && msg.type) {
@@ -594,8 +599,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       case "pair_bridge": {
         if (!popupSender(_sender)) { sendResponse({ok:false,error:"Pairing is restricted to the extension popup."}); break; }
         try {
-          const token = typeof msg.token === "string" && msg.token.trim() ? msg.token.trim() : await nativeCredential();
-          if (!validCredential(token)) { sendResponse({ok:false,error:"Enable automatic pairing in Snapgent, or enter the 64-character local credential."}); break; }
+          const token = typeof msg.token === "string" ? msg.token.trim() : "";
+          if (!validCredential(token)) { sendResponse({ok:false,error:"Copy the 64-character pairing credential from the Snapgent desktop UI."}); break; }
           credentialRevision++;
           await credentialStore("readwrite", token);
           connectionState = "offline"; connectionError = "";

@@ -1,8 +1,6 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
-mod pairing;
 mod settings;
 mod theme;
-mod tray;
 use eframe::egui::{self, Color32, CornerRadius, Frame, Margin, RichText, Stroke};
 use serde_json::{Value, json};
 use settings::Settings;
@@ -36,9 +34,6 @@ struct Desktop {
     logs: Vec<String>,
     last_seq: u64,
     trust: bool,
-    tray: Option<tray::Tray>,
-    quitting: bool,
-    hidden: bool,
 }
 
 impl Desktop {
@@ -74,18 +69,12 @@ impl Desktop {
             logs: vec![],
             last_seq: 0,
             trust: false,
-            tray: tray::Tray::new().ok(),
-            quitting: false,
-            hidden: false,
         };
         if desktop
             .settings
             .as_ref()
             .is_some_and(|s| Settings::valid_id(&s.extension_id))
         {
-            if let Some(s) = desktop.settings.as_ref() {
-                let _ = pairing::register(s);
-            }
             desktop.start(&cc.egui_ctx);
         }
         desktop
@@ -168,6 +157,7 @@ impl Desktop {
             approval.respond(false);
         }
         if let Some(state) = &self.state {
+            state.approvals.set_trusted_terminal(false);
             state.request_stop();
         }
         self.trust = false;
@@ -180,7 +170,7 @@ impl Desktop {
             if self.approval.as_ref().is_some_and(|a| a.expired()) {
                 self.approval = None;
             }
-            if self.approval.is_none() {
+            if self.approval.is_none() && self.status() == "Running" {
                 self.approval = state.approvals.take();
             }
             for event in state.events.recent(self.last_seq) {
@@ -291,7 +281,7 @@ impl Desktop {
             if status.starts_with("Error") {
                 ui.label(RichText::new(&status).color(RED));
                 ui.label(
-                    RichText::new("Check whether another bridge is already running, then retry.")
+                    RichText::new("If another Snapgent process owns these ports, close that instance before starting this bridge.")
                         .color(MUTED),
                 );
             } else if status == "Starting" {
@@ -469,18 +459,6 @@ impl Desktop {
                         Err(e) => e.to_string(),
                     };
                 }
-                if ui
-                    .add_enabled(!active, egui::Button::new("Enable automatic pairing"))
-                    .clicked()
-                {
-                    self.message = match settings
-                        .save_origin()
-                        .and_then(|_| pairing::register(settings))
-                    {
-                        Ok(()) => "Automatic pairing enabled for the trusted extension.".into(),
-                        Err(e) => e.to_string(),
-                    };
-                }
                 if ui.button("Copy pairing credential").clicked() {
                     ctx.copy_text(settings.token.clone());
                     self.message =
@@ -570,35 +548,11 @@ fn open_log(path: &Path, follow: bool) -> std::io::Result<()> {
 
 impl eframe::App for Desktop {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if let Some(action) = self.tray.as_ref().and_then(|t| t.poll()) {
-            match action {
-                tray::Action::Show => {
-                    self.hidden = false;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                }
-                tray::Action::Hide => {
-                    self.hidden = true;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                }
-                tray::Action::Quit => {
-                    self.quitting = true;
-                    self.stop();
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-            }
-        }
-        if !self.quitting && self.tray.is_some() && ctx.input(|i| i.viewport().close_requested()) {
-            self.hidden = true;
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        // Closing the window is a real shutdown, not a hide-to-tray action.
+        if ctx.input(|i| i.viewport().close_requested()) {
+            self.stop();
         }
         self.refresh();
-        if self.approval.is_some() && self.hidden {
-            self.hidden = false;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-        }
         egui::TopBottomPanel::top("header")
             .frame(Frame::new().fill(BG).inner_margin(Margin::same(16)))
             .show(ctx, |ui| {
@@ -641,10 +595,7 @@ impl eframe::App for Desktop {
             .show(ctx, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new("Local MCP bridge").small().color(MUTED));
-                    if self.tray.is_some() && ui.button("Hide to tray").clicked() {
-                        self.hidden = true;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                    }
+                    ui.label(RichText::new("Closing this window stops the bridge.").small().color(MUTED));
                 });
                 if !self.message.is_empty() {
                     ui.label(RichText::new(&self.message).small().color(GOLD));
@@ -718,93 +669,22 @@ impl eframe::App for Desktop {
 impl Drop for Desktop {
     fn drop(&mut self) {
         self.stop();
+        if let Some(mut worker) = self.worker.take() {
+            if self.runtime.block_on(async {
+                tokio::time::timeout(Duration::from_secs(5), &mut worker).await
+            }).is_err() {
+                worker.abort();
+            }
+        }
     }
 }
 fn main() -> eframe::Result<()> {
-    if let Some(origin) = std::env::args()
-        .nth(1)
-        .filter(|s| s.starts_with("chrome-extension://"))
-    {
-        if pairing::native_request(&origin).is_err() {
-            std::process::exit(1);
-        }
+    // Old Native Messaging registrations may still invoke this executable.
+    // Never start a bridge or return credentials to that legacy invocation.
+    if std::env::args().nth(1).is_some_and(|arg| arg.starts_with("chrome-extension://")) {
         return Ok(());
     }
-    if std::env::args().any(|a| a == "--headless" || a == "--bridge" || a == "--serve") {
-        use std::io::Write;
-        let settings = Settings::load().map_err(|e| eframe::Error::AppCreation(e.into()))?;
-        let _ = pairing::register(&settings);
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .map_err(|e| eframe::Error::AppCreation(e.into()))?;
-        let state = snapgent_bridge::State::new(
-            settings.root.clone(),
-            settings.token.clone(),
-            settings.origins(),
-        )
-        .map_err(|e| eframe::Error::AppCreation(e.into()))?;
-        let _ = writeln!(
-            std::io::stdout(),
-            "Snapgent bridge listening on 17613/17614..."
-        );
-        let log_root = settings.root.clone();
-        let log_state = state.clone();
-        rt.spawn(async move {
-            let (_, mut events) = log_state.events.subscribe(0);
-            let folder = log_root.join("logs");
-            let _ = std::fs::create_dir_all(&folder);
-            while let Ok(event) = events.recv().await {
-                if event["source"] == "client" {
-                    continue;
-                }
-                let kind = event["event"].as_str().unwrap_or("");
-                let line = match kind {
-                    "log" => event["message"].as_str().unwrap_or("").to_owned(),
-                    "tool_start" => format!(
-                        "START  {}  {}",
-                        event["server"].as_str().unwrap_or(""),
-                        event["tool"].as_str().unwrap_or("")
-                    ),
-                    "tool_end" => format!(
-                        "{}  {}  {} ms",
-                        if event["ok"] == true { "DONE" } else { "ERR" },
-                        event["tool"].as_str().unwrap_or(""),
-                        event["duration_ms"].as_u64().unwrap_or(0)
-                    ),
-                    _ => continue,
-                };
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs_f64();
-                if let Ok(mut file) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(folder.join("native-bridge.log"))
-                {
-                    let _ = writeln!(file, "{:.3} {line}", now);
-                }
-            }
-        });
-        if std::env::args().any(|a| a == "--auto-approve" || a == "--trust") {
-            let app_state = state.clone();
-            rt.spawn(async move {
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    if let Some(appr) = app_state.approvals.take() {
-                        appr.respond(true);
-                    }
-                }
-            });
-        }
-        let outcome = rt.block_on(async { state.run(17613, 17614).await });
-        if let Err(e) = outcome {
-            let _ = writeln!(std::io::stderr(), "Bridge error: {e}");
-        }
-        return Ok(());
-    }
+    // All normal invocations open the desktop UI, including obsolete CLI flags.
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Snapgent")
         .with_inner_size([540.0, 570.0])

@@ -49,7 +49,7 @@ const api = new Function("chrome", "WebSocket", "crypto", "TextEncoder",
   await sock.recv({ type: "auth_challenge", nonce: serverNonce, proof: proof("server", client) });
   assert.deepEqual(sock.sent[1], { type: "authenticate", proof: proof("client", client) });
   assert.equal(api.statusObj().connected, false);
-  await sock.recv({ type: "authenticated", nonce: serverNonce });
+  await sock.recv({ type: "authenticated", nonce: serverNonce, ui_owned: true });
   assert.equal(api.statusObj().connected, true);
   await sock.recv({ type: "connected", tools: [{ name: "zed/list_dir" }], servers: [{ id: "zed", alive: true, tools: 1 }] });
   assert.equal(api.statusObj().tools, 1);
@@ -64,6 +64,15 @@ const api = new Function("chrome", "WebSocket", "crypto", "TextEncoder",
   assert.equal(api.statusObj().connected, false);
   assert.equal(api.statusObj().connectionState, "pairing_required");
   assert.equal(sock.sent.length, 1);
+  api.connect();
+  sock = sockets.at(-1);
+  await sock.open();
+  const legacyClient = sock.sent[0].nonce;
+  await sock.recv({ type: "auth_challenge", nonce: serverNonce, proof: proof("server", legacyClient) });
+  await sock.recv({ type: "authenticated", nonce: serverNonce });
+  assert.equal(api.statusObj().connected, false);
+  assert.equal(api.statusObj().connectionState, "upgrade_required");
+  assert.equal(api.statusObj().tools, 0);
   assert.equal(api.popupSender({ id: "test", url: chrome.runtime.getURL("popup.html"), tab: { id: 1 } }), false);
   assert.equal(api.popupSender({ id: "test", url: chrome.runtime.getURL("popup.html") }), true);
   console.log("PASS: authenticated transport, proof parity, disconnect ambiguity, popup authorization");
