@@ -62,7 +62,7 @@ const internals = new Function(
   "chrome",
   "WebSocket",
   "ZSGuard",
-  src + "\n; return { send, failAllPending, pending, pushFrame, setConnected: (v) => { connected = v; }, setWs: (w) => { ws = w; } };"
+  src + "\n; return { send, failAllPending, pending, pushFrame, recoverLocalCall, handleBridgeMessage, setRecovery: (v) => { callRecovery = v; workspaceBinding = v; }, setConnected: (v) => { connected = v; }, setWs: (w) => { ws = w; } };"
 )(global.chrome, global.WebSocket, ZSGuard);
 
 const { send, failAllPending, pending } = internals;
@@ -128,6 +128,22 @@ const { send, failAllPending, pending } = internals;
     ok("ping is a known message type", !(reply && reply.error === "unknown message"));
     ok("ping answers a structured failure when the bridge is down",
       reply && (reply.ok === true || typeof reply.kind === "string"));
+  }
+  // A recovered local call must send only receipt queries, never call_tool.
+  {
+    const frames = [];
+    internals.setConnected(true);
+    internals.setRecovery(true);
+    internals.setWs({readyState:1,close(){},send(raw) {
+      const request = JSON.parse(raw);
+      frames.push(request);
+      queueMicrotask(()=>internals.handleBridgeMessage(frames.length === 1
+        ? {type:"tool_result",id:request.id,ok:false,kind:"recovering"}
+        : {type:"tool_result",id:request.id,ok:true,text:"original result"}));
+    }});
+    const r = await internals.recoverLocalCall({session:"ab".repeat(32),call_id:"receipt"},()=>true,4000);
+    ok("recover polls the original receipt until ready",r.ok && r.text === "original result");
+    ok("recover never replays the local command",frames.length===2 && frames.every(x=>x.type==="recover_tool" && x.call_id==="receipt"));
   }
   // ── progress frames (pushFrame) ──────────────────────────────────────
   // A progress frame is advisory: it must go out, it must carry no id (the

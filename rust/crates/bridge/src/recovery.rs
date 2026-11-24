@@ -29,19 +29,26 @@ fn with_id(mut result: Value, id: &Value) -> Value {
     result
 }
 impl Receipts {
-    pub async fn start(&self, state: Arc<State>, session: Arc<Mutex<Session>>, request: Value) -> Value {
+    pub async fn begin(&self, state: Arc<State>, session: Arc<Mutex<Session>>, request: Value) -> Result<watch::Receiver<Option<Value>>, Value> {
         let id = request["id"].clone();
         let Some(key) = key(&request) else {
-            return error(&id,"tool_error","Invalid call receipt");
+            return Err(error(&id,"tool_error","Invalid call receipt"));
         };
         let mut signature = request.clone();
-        signature.as_object_mut().expect("request object").remove("id");
-        let mut receiver = {
+        let retry_unbound = request["retry_unbound"].as_bool() == Some(true);
+        let signature_object = signature.as_object_mut().expect("request object");
+        signature_object.remove("id");
+        signature_object.remove("retry_unbound");
+        let receiver = {
             let mut entries = self.entries.lock().await;
             entries.retain(|_, e| e.result.borrow().is_none() || e.created.elapsed() < Duration::from_secs(900));
+            if retry_unbound && entries.get(&key).is_some_and(|e| e.request == signature &&
+                e.result.borrow().as_ref().is_some_and(|r| r["kind"] == "workspace_unbound")) {
+                entries.remove(&key);
+            }
             if let Some(entry) = entries.get(&key) {
                 if entry.request != signature {
-                    return error(&id,"permission_denied","Call ID already belongs to another request");
+                    return Err(error(&id,"permission_denied","Call ID already belongs to another request"));
                 }
                 entry.result.clone()
             } else {
@@ -53,7 +60,7 @@ impl Receipts {
                     if let Some(old) = oldest { entries.remove(&old); }
                 }
                 if entries.len() >= 64 || entries.values().filter(|e| e.result.borrow().is_none()).count() >= 16 {
-                    return error(&id,"busy","Local execution queue full");
+                    return Err(error(&id,"busy","Local execution queue full"));
                 }
                 let (result_tx, result_rx) = watch::channel(None);
                 let (cancel_tx, mut cancel_rx) = watch::channel(false);
@@ -81,6 +88,9 @@ impl Receipts {
                 result_rx
             }
         };
+        Ok(receiver)
+    }
+    pub async fn wait(mut receiver: watch::Receiver<Option<Value>>, id: Value) -> Value {
         loop {
             if let Some(result) = receiver.borrow().clone() { return with_id(result, &id); }
             if receiver.changed().await.is_err() { return error(&id,"outcome_unknown","Receipt lost; verify changes before retrying"); }

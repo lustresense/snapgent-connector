@@ -175,10 +175,20 @@ async fn client(mut socket: WebSocket, state: Arc<State>) {
                                 let tx = tx.clone();
                                 if request["server"] == "local" && call_key.is_some() {
                                     // The socket waiter is disposable; the receipt owns execution.
-                                    tasks.spawn(async move {
-                                        let response = state.receipts.start(state.clone(), session, request).await;
-                                        let _ = tx.send(response).await;
-                                    });
+                                    let id = request["id"].clone();
+                                    // Register before processing another socket frame (including
+                                    // disconnect and cancellation), then spawn only the waiter.
+                                    match state.receipts.begin(state.clone(), session, request).await {
+                                        Ok(receipt) => {
+                                            tasks.spawn(async move {
+                                                let response = crate::recovery::Receipts::wait(receipt, id).await;
+                                                let _ = tx.send(response).await;
+                                            });
+                                        }
+                                        Err(response) => {
+                                            let _ = writer.send(Message::Text(response.to_string().into())).await;
+                                        }
+                                    }
                                 } else {
                                     let id = request["id"].clone();
                                     let task = tasks.spawn(async move {

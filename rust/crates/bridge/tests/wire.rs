@@ -134,6 +134,94 @@ async fn authenticated_wire_contract() {
     tokio::time::timeout(Duration::from_secs(2), async {
         while !approval.expired() { tokio::time::sleep(Duration::from_millis(20)).await; }
     }).await.unwrap();
+    // Lose the socket while an original command waits for local approval.
+    ws.send(Message::Text(json!({"type":"call_tool","id":127,"name":"run_command","server":"local","session":sid,"call_id":"recover-test","arguments":{"command":"this-must-not-run"}}).to_string().into())).await.unwrap();
+    let approval = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(approval) = state.approvals.take() { break approval; }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.unwrap();
+    ws.close(None).await.unwrap();
+    drop(ws);
+    let mut request = url.as_str().into_client_request().unwrap();
+    request.headers_mut().insert("origin", origin.parse().unwrap());
+    let (mut ws, _) = connect_async(request).await.unwrap();
+    let nonce = "34".repeat(32);
+    ws.send(Message::Text(json!({"type":"auth_hello","nonce":nonce}).to_string().into())).await.unwrap();
+    let challenge: Value = serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+    let server = challenge["nonce"].as_str().unwrap();
+    ws.send(Message::Text(json!({"type":"authenticate","proof":snapgent_security::proof(&token,"client",&nonce,server).unwrap()}).to_string().into())).await.unwrap();
+    let authenticated: Value = serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+    assert_eq!(authenticated["type"], "authenticated");
+    ws.send(Message::Text(json!({"type":"recover_tool","id":128,"session":sid,"call_id":"recover-test"}).to_string().into())).await.unwrap();
+    let pending = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let message = ws.next().await.unwrap().unwrap();
+            if let Ok(text) = message.to_text() {
+                let result: Value = serde_json::from_str(text).unwrap();
+                if result["id"] == 128 { break result; }
+            }
+        }
+    }).await.unwrap();
+    assert_eq!(pending["kind"],"recovering");
+    assert!(!approval.expired());
+    approval.respond(false);
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            ws.send(Message::Text(json!({"type":"recover_tool","id":129,"session":sid,"call_id":"recover-test"}).to_string().into())).await.unwrap();
+            let result = loop {
+                let message = ws.next().await.unwrap().unwrap();
+                if let Ok(text) = message.to_text() {
+                    let result: Value = serde_json::from_str(text).unwrap();
+                    if result["id"] == 129 { break result; }
+                }
+            };
+            if result["kind"] != "recovering" { break result; }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.unwrap();
+    assert_eq!(result["kind"],"permission_denied");
+    assert!(state.approvals.take().is_none());
+    ws.send(Message::Text(json!({"type":"recover_tool","id":130,"session":sid,"call_id":"missing"}).to_string().into())).await.unwrap();
+    let missing = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let message = ws.next().await.unwrap().unwrap();
+            if let Ok(text) = message.to_text() {
+                let result: Value = serde_json::from_str(text).unwrap();
+                if result["id"] == 130 { break result; }
+            }
+        }
+    }).await.unwrap();
+    assert_eq!(missing["kind"],"outcome_unknown");
+    // A successful write receipt may be fetched/repeated without another write.
+    let create = json!({"type":"call_tool","id":131,"name":"create_file","server":"local","session":sid,"call_id":"write-once","arguments":{"path":"once.txt","content":"original"}});
+    ws.send(Message::Text(create.to_string().into())).await.unwrap();
+    let written = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let message = ws.next().await.unwrap().unwrap();
+            if let Ok(text) = message.to_text() {
+                let result: Value = serde_json::from_str(text).unwrap();
+                if result["id"] == 131 { break result; }
+            }
+        }
+    }).await.unwrap();
+    assert_eq!(written["ok"],true);
+    std::fs::write(root.join("once.txt"),"changed externally").unwrap();
+    let mut duplicate = create.clone();
+    duplicate["id"] = json!(132);
+    ws.send(Message::Text(duplicate.to_string().into())).await.unwrap();
+    let recovered = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let message = ws.next().await.unwrap().unwrap();
+            if let Ok(text) = message.to_text() {
+                let result: Value = serde_json::from_str(text).unwrap();
+                if result["id"] == 132 { break result; }
+            }
+        }
+    }).await.unwrap();
+    assert_eq!(recovered["ok"],true);
+    assert_eq!(std::fs::read_to_string(root.join("once.txt")).unwrap(),"changed externally");
     // Stop while the extension is still connected. The UI shutdown must close
     // the active connection, not only the listening port.
     state.request_stop();

@@ -704,7 +704,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         if (validCredential(msg.session) && typeof msg.call_id === "string" && msg.call_id.length <= 128) {
           cancelledCalls.set(cancellationKey(msg), Date.now());
           pruneCancelledCalls();
-          if (connected) await send({type:"cancel_tool", session:msg.session, call_id:msg.call_id}, 5000);
+          const until = Date.now() + 30000;
+          while (Date.now() < until) {
+            const result = await send({type:"cancel_tool", session:msg.session, call_id:msg.call_id},5000);
+            if (result.ok) break;
+            await new Promise(resolve=>setTimeout(resolve,800));
+          }
         }
         sendResponse({ok:true}); break;
       }
@@ -743,14 +748,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           const bound = await ensureWorkspaceBound(msg,true);
           if (wasCancelled()) { cancelled(); break; }
           if (bound.ok) {
-            const recoverableRetry = callRecovery && !!payload.call_id;
-            // An unbound result is cached under the first receipt. Use a new
-            // receipt only after explicit pre-execution rejection; otherwise
-            // the caller must not repeat the command.
-            if (recoverableRetry) {
-              sendResponse({ok:false,kind:"workspace_unbound",sent:false,error:"Workspace reapproved; command not executed. Retry the command."}); break;
+            result = await send({...payload,retry_unbound:true},timeout,() => !wasCancelled());
+            if (recoverable && ["disconnected","timeout"].includes(result.kind) && result.sent !== false && !wasCancelled()) {
+              result = await recoverLocalCall(msg,()=>!wasCancelled());
             }
-            result = await send(payload,timeout,() => !wasCancelled());
           }
           else result = {...bound,sent:false};
         }
