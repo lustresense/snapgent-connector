@@ -1270,6 +1270,7 @@ const ZSProvider = (() => {
           });
           continue;
         }
+        if (!canSend()) return false;
         ed = ready;
         // Keep the exact staged draft on retry rather than remounting the editor.
         if (composerHolds(ed, text)) { got = editorText().length; break; }
@@ -1309,9 +1310,10 @@ const ZSProvider = (() => {
       if (stopButton()) return false;
       ed = getEditor();
       if (!ed || !composerHolds(ed, text)) return false;
-      if (ready() && attempt % 2 === 0) {
+      if (ready() && attempt % 3 !== 1) {
         const btn = sendButton();
-        btn.click();
+        if (attempt % 3 === 2 && btn.type === "submit" && btn.form && typeof btn.form.requestSubmit === "function") btn.form.requestSubmit(btn);
+        else btn.click();
         if (await waitFor(accepted, 6000)) return true;
         // Report an attempted submission even if the site has not acknowledged
         // the click; core checks the transcript and guards duplicate retries.

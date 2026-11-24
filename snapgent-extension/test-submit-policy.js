@@ -26,7 +26,11 @@ async function scenario(name, mode) {
   }
   class Key { constructor(type, options) { this.type = type; Object.assign(this, options); } }
   const editor = new Editor();
-  const button = {disabled:mode === "disabled", getAttribute:()=>null, focus(){}, click(){ clicks++; land(); }};
+  const button = {disabled:mode === "disabled", getAttribute:()=>null, focus(){}, click(){
+    clicks++;
+    if (mode === "swallowed-click" && clicks === 1) return;
+    land();
+  }};
   const setText = (_,t) => { draft = t; return true; };
   const env = {
     getEditor:()=>editor, editorText:()=>draft, userCount:()=>users, writeText:setText,
@@ -51,7 +55,16 @@ async function scenario(name, mode) {
   };
   const fn = new Function("env", "with(env) { return (" + source.slice(i,j) + "); }")(env);
   const result = await fn(feedback,null,()=>allowed,mode==="retry"?1:0);
-  if(mode==="ready" || mode==="retry") {
+  if (mode === "swallowed-click") {
+    assert.strictEqual(result,true,name+": first click attempted");
+    assert.strictEqual(draft,feedback,name+": first click left full draft");
+    assert.strictEqual(users,0,name+": first click did not submit");
+    assert.strictEqual(await fn(feedback,null,()=>allowed,1),true,name+": fallback attempted");
+    assert.strictEqual(clicks,1,name+": no repeat of swallowed click");
+    assert.strictEqual(enters,1,name+": automatic Enter fallback");
+    assert.strictEqual(users,1,name+": exactly one actual message");
+    assert.strictEqual(submittedText,feedback,name+": fallback sent full feedback");
+  } else if(mode==="ready" || mode==="retry") {
     assert.strictEqual(result,true,name+": "+mode+" attempted");
     assert.strictEqual(clicks+enters,1,name+": exactly one dispatch");
     assert.strictEqual(submittedText,feedback,name+": complete feedback");
@@ -62,7 +75,7 @@ async function scenario(name, mode) {
 }
 async function main() {
   for(const name of names) {
-    for(const mode of ["ready","retry","disabled","stopped-before","stopped-during-wait"]) {
+    for(const mode of ["ready","retry","disabled","stopped-before","stopped-during-wait","swallowed-click"]) {
       await scenario(name,mode);
       console.log("PASS "+name+" "+mode);
     }

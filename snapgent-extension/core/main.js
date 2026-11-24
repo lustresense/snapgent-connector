@@ -1433,7 +1433,14 @@
         // A service-worker messaging channel can disappear independently of
         // the native call. Recover the receipt through the next worker.
         if (boundWorkspace && result && result.kind === "disconnected" && result.sent !== false && !stopped()) {
-          result = await Promise.race([bg({type:"recover_tool",session:boundWorkspace.session,call_id:callId}),hardCap,stopWatch]);
+          // The recovery query itself is read-only and may safely survive
+          // multiple worker restarts without resubmitting the original call.
+          const recoverUntil = Date.now() + 420000;
+          while (!stopped() && Date.now() < recoverUntil && result.kind === "disconnected") {
+            result = await Promise.race([bg({type:"recover_tool",session:boundWorkspace.session,call_id:callId}),hardCap,stopWatch]);
+            if (result.kind === "disconnected") await sleep(800);
+          }
+          if (result.kind === "disconnected") result = {ok:false,kind:"outcome_unknown",error:"Original receipt unavailable; verify changes"};
         }
         if (boundWorkspace && result && ["stopped","timeout"].includes(result.kind)) {
           bg({type:"cancel_tool",session:boundWorkspace.session,call_id:callId}).catch(() => {});
