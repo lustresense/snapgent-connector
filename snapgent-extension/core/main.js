@@ -1175,6 +1175,10 @@
       A.toolList = tools;
       refreshActiveToolNames();
       A.toolsAt = Date.now();
+    } else if (force) {
+      A.toolList = [];
+      refreshActiveToolNames();
+      A.toolsAt = 0;
     }
     return A.toolList;
   }
@@ -2650,17 +2654,36 @@
   // ════════════════════════════════════════════════════════════════════════
   //  SESSION BOOTSTRAP  ("Starting Up" animated chip, shown in the conversation)
   // ════════════════════════════════════════════════════════════════════════
+  // Explicit Start may attach to a stable existing Local Workspace conversation.
+  // Merely opening a conversation never grants permission to execute its history.
+  function canStartConversation(empty, key, local) {
+    return empty || (local && !!key);
+  }
+  function bootstrapReady(result) {
+    return !!result && result.kind === "text" && !!String(result.text || "").trim();
+  }
+  function bridgeStatusHint(s) {
+    if (s.connectionState === "upgrade_required") return "Update desktop executable";
+    if (s.connectionState === "pairing_required") return "Pair in extension popup";
+    if (s.connectionState === "authenticating") return "Authenticating desktop…";
+    if (s.connectionState === "connecting") return "Connecting to desktop…";
+    if (!s.connected) return "Open Snapgent desktop";
+    if (!s.workspaceBinding) return "Waiting for workspace capability";
+    return "Choose workspace folder";
+  }
   async function startSession() {
     await targetReady;
-    if (A.running || A.starting || workspaceChoosing) return;
+    if (A.running || A.starting || A.started || A.injecting || workspaceChoosing) return;
     if (selectedTargetId === "none") {
       ui.toast("Select an MCP target first.");
       return;
     }
-    // "Start session" is allowed ONLY on a blank conversation. Opening an
-    // EXISTING conversation must never trigger the bootstrap.
-    if (!P.chatIsEmpty() && !A.started) {
-      ui.toast("Use an empty chat.");
+    if (!canStartConversation(P.chatIsEmpty(), P.conversationKey(), isWorkspaceTarget())) {
+      ui.toast("Open a new chat or select a stable Local Workspace conversation.");
+      return;
+    }
+    if (P.isGenerating() || P.editorText().trim()) {
+      ui.toast("Wait for the current reply and clear or send your draft before Start.");
       return;
     }
     A.userStopped = false;
@@ -2672,7 +2695,7 @@
     A.bootBaselineId = P.lastAssistantId ? P.lastAssistantId() : null;
     A.starting = true;
     const myGen = ++A.startGen;   // identity of THIS bootstrap
-    A.startingKey = null;          // unknown until the conversation gets an id
+    A.startingKey = P.conversationKey() || null; // pin existing chat immediately
     const alive = () => A.startGen === myGen; // false once superseded/aborted
     A.toolCallsSinceReminder = 0; // fresh reminder cadence for the new session
     ui.setStarting(true);
@@ -2680,9 +2703,14 @@
     P.setInputLock(true); // block user input during bootstrap
     ui.inputCover(true);  // cover the composer ("Working…") for the WHOLE Starting Up
     try {
-      await ensureTools(true); // boot: always take a fresh catalogue (the TTL then
-                               // covers the list_commands / list_mcp_servers calls
-                               // the model makes seconds later)
+      const liveStatus = await bg({type:"status"});
+      if (!alive()) return;
+      if (typeof liveStatus?.connected === "boolean") ui.setStatus(liveStatus);
+      if (isWorkspaceTarget() && (!liveStatus?.connected || !liveStatus.workspaceBinding)) {
+        ui.banner("warn", "Desktop not ready", liveStatus?.connectionError || bridgeStatusHint(liveStatus || {}));
+        return;
+      }
+      await ensureTools(true);
       if (!alive()) return;
       const selectedTools = activeTools();
       const workspaceServer = (A.bridge && A.bridge.servers || []).find((server) => server.id === selectedTargetId);
@@ -2761,8 +2789,10 @@
         // (the bridge keeps advertising Roblox's catalogue even with no Studio
         // attached, so A.toolList still has 25+ entries that were never actually
         // usable this boot).
-        if (/currently OFFLINE|No commands available|no server named/i.test(toolFeedback)) {
+        if (/currently OFFLINE|No commands available|no server named|\nERROR:/i.test(toolFeedback)) {
           decorate.toolBox(startRes.item, "Loading commands", "err", `${ui.getTargetName()} unavailable`, true);
+          ui.banner("warn", "Start did not complete", "The selected command catalogue is unavailable. Check the workspace and desktop connection.");
+          return;
         } else {
           decorate.toolBox(startRes.item, "Loading commands", "done", `${activeTools().length} commands`, true);
         }
@@ -2770,6 +2800,11 @@
         const readyRes = await waitForResponse(base2); // wait for "I'm ready" reply
         if (!alive()) return;
         if (A.stop || readyRes.kind === "stopped") { diag("start.aborted", { kind: readyRes.kind }); return; }
+        if (!bootstrapReady(readyRes)) {
+          diag("start.notReady", { kind: readyRes.kind });
+          ui.banner("warn", "Start did not complete", "The command catalogue was sent but the provider did not finish its ready reply. Click Start to retry.");
+          return;
+        }
       } else if (startRes.kind === "fallback_turn") {
         // 2026-11 ChatGPT: the bootstrap was answered with a placeholder turn that
         // never renders its text. Declaring the session ready here would leave the
@@ -2778,7 +2813,7 @@
         diag("start.noToolCall", { kind: startRes.kind });
         ui.banner("warn", "Start did not complete", FALLBACK_TURN_TEXT);
         return; // do NOT mark the session ready
-      } else if (startRes.kind !== "tool") {
+      } else {
         // The bootstrap used to fall through to A.started = true with NO command
         // ever executed - the bar flipped to "Ready", yet nothing was wired and
         // every later tool call died silently. Report the real outcome instead.
@@ -2795,6 +2830,7 @@
           truncated: "reply was cut off before the command finished",
           context_limit: "conversation hit the context limit",
           too_long: "the message was too long for the site",
+          tool: "the provider did not request the command catalogue as its first action",
         }[kind] || `unexpected reply kind "${kind}"`;
         ui.banner("warn", "Start did not complete", why);
         return; // do NOT mark the session ready - "Start" must stay available
@@ -3942,7 +3978,7 @@
       workspaceChoosing = true;
       let pop;
       try {
-        if (!A.bridge.connected || !A.bridge.workspaceBinding) { toast("Connect the native Snapgent bridge first."); return; }
+        if (!A.bridge.connected || !A.bridge.workspaceBinding) { toast(bridgeStatusHint(A.bridge)); return; }
         pop = document.createElement("div");
         pop.id = "zs-workspace-picker";
         pop.innerHTML = '<section role="dialog" aria-modal="true" aria-label="Choose workspace"><h3>Choose workspace</h3><p>Enter the absolute path of the folder you want to work in. No editor is required.</p><label>Local folder path<input type="text" placeholder="Absolute directory path"></label><div><button type="button" data-cancel>Cancel</button><button type="button" data-confirm>Use workspace</button></div><p role="status"></p></section>';
@@ -4401,7 +4437,7 @@
         const tools = activeTools().length || (server && server.tools) || 0;
         if (!A.bridge.connected) {
           toneClass = "warn"; warn = true;
-          msg = `<b>Active</b> · run start.bat`;
+          msg = `<b>Active</b> · ${bridgeStatusHint(A.bridge)}`;
         } else if (isWorkspaceTarget() && A.bridge.workspaceBinding && (!workspaceChoice || workspaceChoice.key !== workspaceKey())) {
           toneClass = "warn"; warn = true;
           msg = `<b>Active</b> · choose workspace`;
@@ -4463,7 +4499,7 @@
           // The green "Agent active" text is the live status signal.
           msg = `<b>Active</b>${tools ? ` · ${tools} tools` : ""}`;
         }
-      } else if (P.isFreshChat() || P.chatIsEmpty()) {
+      } else if (canStartConversation(P.chatIsEmpty(), P.conversationKey(), isWorkspaceTarget())) {
         // Treat ANY empty chat (no turns yet) as the standby/start case - not just
         // the strict fresh-chat match. isFreshChat() also requires an exact root
         // path AND the editor already mounted; on a cold load (e.g. arriving from a
@@ -4485,7 +4521,9 @@
               (!bridgeOk || (isWorkspaceTarget() && !workspaceSelected))) {
             toneClass = "warn"; warn = true;
             msg = !A.bridge.connected
-              ? `Run <b>start.bat</b>`
+              ? bridgeStatusHint(A.bridge)
+              : isWorkspaceTarget() && !A.bridge.workspaceBinding
+                ? bridgeStatusHint(A.bridge)
               : isWorkspaceTarget() && (bridgeOk || localWorkspaceMissing)
                 ? workspaceProbePending
                   ? `Checking <b>${targetNameHtml()} workspace</b>…`
@@ -4495,7 +4533,7 @@
           } else if (bridgeOk && (!isWorkspaceTarget() || workspaceSelected)) {
             toneClass = "standby";
             msg = isWorkspaceTarget() && !workspaceReady ? `Approve workspace on Start.` : `Ready.`;
-            label = `▶︎ Start`; kind = "start";
+            label = P.chatIsEmpty() ? "▶︎ Start" : "▶︎ Start here"; kind = "start";
           } else if (addonOk) {
             // Roblox is down but another MCP server is live: allow a DEGRADED start
             // (yellow). The agent runs on the other server(s); Roblox tools stay
@@ -5816,7 +5854,10 @@
     if (isWorkspaceTarget() && A.bridge.workspaceBinding && workspaceChoice && workspaceChoice.key !== workspaceKey()) {
       loadWorkspaceChoice().then(()=>ui.setStarted(A.started));
     }
-    const markerInDom = domHasZsSignal();
+    // A local session is remembered only after a completed explicit bootstrap.
+    // Transcript text (including a failed bootstrap or pasted command examples)
+    // must not grant a local execution session.
+    const markerInDom = !isWorkspaceTarget() && domHasZsSignal();
     if (markerInDom) rememberSession(path);
     let has;
     if (path && path === lastSyncPath) {

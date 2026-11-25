@@ -1,4 +1,6 @@
-# snapgentV3 Free - AI Roblox Studio Agent (ChatGPT, Claude, DeepSeek, Gemini, Grok, Kimi, GLM, Qwen, Qwen Coder, Arena, Meta AI, Ptero)
+# Snapgent browser extension
+
+**Native Rust setup:** load this directory as an unpacked extension, open the visible `dist/native/Snapgent.exe`, save the trusted extension ID in desktop Settings, copy the pairing credential into the extension popup, and wait for **Desktop connected**. Choose **Local Workspace**, approve a folder in the desktop, and click **Start** (or **Start here** in an existing supported conversation). No editor is required. If the popup says **Old bridge rejected**, rebuild the native executable from current main; authentication in a native log alone does not establish extension compatibility. Older instructions below describe the legacy upstream bridge and are retained for reference only.
 
 Control Roblox Studio with AI, for free. snapgentV3 turns a normal AI chat (ChatGPT, Claude, DeepSeek, Google Gemini, Grok, Kimi, GLM, Qwen, Qwen Coder, Arena, Meta AI, or Ptero) into an agent that builds and scripts your Roblox game for you: just describe what you want, and it reads/edits scripts, runs Luau, inspects the game tree, and generates assets directly in Roblox Studio. No API key, no terminal, no coding required.
 

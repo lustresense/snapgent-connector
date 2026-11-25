@@ -885,3 +885,22 @@ ok("mobile textarea text can be read", P.editorText() === "");
     call('Explain this format: {"command":"list_commands","params":{}}') === false);
   ok("an empty turn is NOT a session", call("") === false);
 }
+
+ // Explicit local attachment and truthful startup state.
+ {
+   const core = readSource("/core/main.js");
+   const extract = name => new Function("return (" + core.match(new RegExp("function " + name + "\\([^\\n]*\\) \\{[\\s\\S]*?\\n  \\}"))[0] + ");")();
+   const canStart = extract("canStartConversation"), ready = extract("bootstrapReady"), hint = extract("bridgeStatusHint");
+   ok("existing local chat can be explicitly started", canStart(false, "/c/test", true));
+   ok("existing nonlocal chat is not implicitly attached", !canStart(false, "/c/test", false));
+   ok("unstable existing chat cannot start", !canStart(false, "", true));
+   ok("fresh chat can start", canStart(true, "", true));
+   ok("bootstrap requires a real ready reply", ready({kind:"text",text:"Ready"}) && !ready({kind:"empty"}) && !ready({kind:"tool"}) && !ready({kind:"text",text:" "}));
+   ok("pairing and obsolete binary are distinguishable", hint({connectionState:"pairing_required"}) === "Pair in extension popup" && hint({connectionState:"upgrade_required"}) === "Update desktop executable");
+   ok("local transcript markers alone do not establish a session", core.includes("const markerInDom = !isWorkspaceTarget() && domHasZsSignal();"));
+   const source = readSource("/providers/chatgpt.js");
+   const route = source.match(/const conversationKey = \(\) => \{[\s\S]*?\n  \};/)[0];
+   const key = pathname => new Function("location", route + "; return conversationKey();")({pathname});
+   ok("project conversation uses the same stable conversation id", key("/g/g-p-123/project/c/abc") === "/c/abc" && key("/c/abc") === "/c/abc");
+   ok("project landing page is not a conversation", key("/g/g-p-123/project") === "");
+ }

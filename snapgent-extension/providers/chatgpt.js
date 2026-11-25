@@ -1463,7 +1463,11 @@ const ZSProvider = (() => {
 
   // "/" = a fresh chat whose conversation id is not assigned yet → "" (transient)
   // so the core never persists it as "started"; /c/<id> = a real conversation.
-  const conversationKey = () => (/^\/c\//.test(location.pathname) ? location.pathname : "");
+  const conversationKey = () => {
+    // ChatGPT project/custom-GPT conversations also have a stable /c/<id> suffix.
+    const match = location.pathname.match(/(?:^|\/)c\/([^/]+)\/?$/);
+    return match ? "/c/" + match[1] : "";
+  };
 
   // ── ChatGPT-only system-prompt rules ──────────────────────────────────────
   // Appended to the shared system prompt via core/config.js's `providerNotes`
